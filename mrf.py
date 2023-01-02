@@ -24,7 +24,7 @@ trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1
 densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
      
 # Takes data input as: [cha z y x], [z y x], or [y x]
-def PopulateISMRMRDImage(header, data, acquisition, image_index):
+def PopulateISMRMRDImage(header, data, acquisition, image_index, colormap=None):
     image = ismrmrd.Image.from_array(data.transpose(), acquisition=acquisition, transpose=False)
     image.image_index = image_index
 
@@ -33,11 +33,15 @@ def PopulateISMRMRDImage(header, data, acquisition, image_index):
                             ctypes.c_float(header.encoding[0].reconSpace.fieldOfView_mm.y), 
                             ctypes.c_float(header.encoding[0].reconSpace.fieldOfView_mm.z))
 
+    if colormap is None:
+        colormap = ""
+
     # Set ISMRMRD Meta Attributes
     meta = ismrmrd.Meta({'DataRole':               'Image',
                          'ImageProcessingHistory': ['FIRE', 'PYTHON'],
                          'WindowCenter':           str(np.max(data)/2),
-                         'WindowWidth':            str(np.max(data))})
+                         'WindowWidth':            str(np.max(data)), 
+                         'GADGETRON_ColorMap':     colormap     })
 
     # Add image orientation directions to MetaAttributes if not already present
     if meta.get('ImageRowDir') is None:
@@ -144,19 +148,18 @@ def process(connection, config, metadata):
     imageMask = GenerateMaskFromCoilmaps(coilmaps)
     patternMatchResults, M0 = PerformPatternMatchingViaMaxInnerProduct(imageData*imageMask, dictionary, simulation)
     
+    images = []
     # Data is ordered [x y z] in patternMatchResults and M0. Need to reorder to [z y x] for ISMRMRD, and split T1/T2 apart
-    T1map = np.swapaxes(patternMatchResults['T1'],0,2)
-    T1image = PopulateISMRMRDImage(header, T1map, acqHeaders[0,0,0], 1)
-    logging.debug("Sending image to client:\n%s", T1image)
-    connection.send_image(T1image)
-    
-    T2map = np.swapaxes(patternMatchResults['T2'],0,2)
-    T2image = PopulateISMRMRDImage(header, T2map, acqHeaders[0,0,0], 2)
-    logging.debug("Sending image to client:\n%s", T2image)
-    connection.send_image(T2image)
-    
-    M0map = np.abs(np.swapaxes(M0,0,2))
-    M0image = PopulateISMRMRDImage(header, M0map, acqHeaders[0,0,0], 3)
-    logging.debug("Sending image to client:\n%s", M0image)
-    connection.send_image(M0image)
+    T1map = patternMatchResults['T1'] * 1000 # to milliseconds
+    T1image = PopulateISMRMRDImage(header, T1map, acqHeaders[0,0,0], 0, colormap="FingerprintingT1.pal")
+    images.append(T1image)   
+    T2map = patternMatchResults['T2'] * 1000 # to milliseconds
+    T2image = PopulateISMRMRDImage(header, T2map, acqHeaders[0,0,0], 1, colormap="FingerprintingT2.pal")   
+    images.append(T2image)   
+ 
+    M0map = (np.abs(M0) / np.max(np.abs(M0))) * 2**12
+    M0image = PopulateISMRMRDImage(header, M0map, acqHeaders[0,0,0], 2)
+    images.append(M0image)   
+
+    connection.send_image(images)
     connection.send_close()
