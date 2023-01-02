@@ -32,7 +32,9 @@ RUN cd /opt/code && \
 RUN cd /usr/local/lib && tar -czvf libismrmrd.tar.gz libismrmrd*
 
 # ----- Start another clean build without all of the build dependencies of siemens_to_ismrmrd -----
-FROM python:3.10.2-slim
+FROM nvcr.io/nvidia/pytorch:22.12-py3
+ARG  DEBIAN_FRONTEND=noninteractive
+ENV  TZ=America/Chicago
 
 LABEL org.opencontainers.image.description="Python MRD Image Reconstruction and Analysis Server"
 LABEL org.opencontainers.image.url="https://github.com/kspaceKelvin/python-ismrmrd-server"
@@ -62,7 +64,8 @@ RUN  cd /opt/code \
 
 # matplotlib is used by rgb.py and provides various visualization tools including colormaps
 # pydicom is used by dicom2mrd.py to parse DICOM data
-RUN pip3 install --no-cache-dir matplotlib pydicom pynetdicom
+# mrftools includes the reconstruction code and dependencies for MR Fingerprinting
+RUN pip3 install --no-cache-dir matplotlib pydicom pynetdicom mrftools tqdm
 
 # # If building from the GitHub repo, uncomment the below section, open a command
 # # prompt in the folder containing this Dockerfile and run the command:

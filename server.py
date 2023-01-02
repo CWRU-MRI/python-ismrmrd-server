@@ -107,7 +107,8 @@ class Server:
                     module = importlib.import_module(config)
                     logging.info("Starting config %s", config)
                     module.process(connection, config, metadata)
-                except ImportError:
+                except ImportError as e:
+                    print(e.msg)
                     logging.info("Unknown config '%s'.  Falling back to 'invertcontrast'", config)
                     invertcontrast.process(connection, config, metadata)
 
