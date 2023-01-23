@@ -12,13 +12,14 @@ from tqdm import tqdm
 from mrftools import *
 import sys
 from matplotlib import pyplot as plt
+from scipy import stats
 
 # Folder for debug output files
 debugFolder = "/tmp/share/debug"
 
 # Configure dictionary simulation parameters
 dictionaryName = "5pctNoB1"
-percentStepSize=5; includeB1=False;  t1Range=(0.1,5000); t2Range=(0.1,1000); b1Range=None; b1Stepsize=None; #b1Range=(0.1, 2.5); b1Stepsize=0.1; #t1Range=(50,5000); t2Range=(1,500)
+fixedStepSize=5; includeB1=False;  t1Range=(5,5000); t2Range=(5,500); b1Range=None; b1Stepsize=None; #b1Range=(0.1, 2.5); b1Stepsize=0.1; #t1Range=(50,5000); t2Range=(1,500)
 phaseRange=(-np.pi, np.pi); numSpins=50; numBatches=20
 trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1916_norm.bin"
 densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
@@ -60,7 +61,33 @@ def PopulateISMRMRDImage(header, data, acquisition, image_index, colormap=None, 
 
     image.attribute_string = xml
     return image
-            
+
+def CoilConsensusPatternMatching(coilImageData, dictionary, simulation, dictionaryStepSizePct=0.03):
+    sizes = np.shape(coilImageData)
+    numSVDComponents=sizes[0]; numCoils=sizes[1]; matrixSize=sizes[2:5]
+    patternMatchResults = np.empty((sizes[1:5]), dtype=DictionaryEntry)    
+    M0 = np.zeros((sizes[1:5]))
+    means = np.zeros((sizes[2],sizes[3],sizes[4]), dtype=DictionaryEntry)
+    stddevs = np.zeros((sizes[2],sizes[3],sizes[4]), dtype=DictionaryEntry)
+    modes = np.zeros((sizes[2],sizes[3],sizes[4]), dtype=DictionaryEntry)
+    confidence = np.zeros((sizes[2],sizes[3],sizes[4]), dtype=DictionaryEntry)
+
+    for coil in np.arange(0,numCoils):
+        patternMatchResults[coil,:,:,:], M0[coil,:,:,:] = PerformPatternMatchingViaMaxInnerProduct(coilImageData[:,coil,:,:,:], dictionary, simulation)
+
+    means['T1'] = np.mean(patternMatchResults['T1'], axis=0)
+    stddevs['T1'] = np.std(patternMatchResults['T1'], axis=0)
+    stddevs['T1'] = np.std(patternMatchResults['T1'], axis=0)
+    modes['T1'] = scipy.stats.mode(patternMatchResults['T1'], axis=0)
+    
+    confidence['T1'] = stddevs['T1']
+
+    means['T2'] = np.mean(patternMatchResults['T2'], axis=0)
+    stddevs['T2'] = np.std(patternMatchResults['T2'], axis=0)
+    confidence['T2'] = stddevs['T2'] 
+
+    return patternMatchResults, M0, means, stddevs, confidence
+
 def process(connection, config, metadata):
     logging.info("Config: \n%s", config)
     logging.info("Metadata: \n%s", metadata)
@@ -135,7 +162,7 @@ def process(connection, config, metadata):
     ## Simulate the Dictionary
     sequence = SequenceParameters("on-the-fly", SequenceType.FISP)
     sequence.Initialize(TRs[:,0]/(1000*1000), TEs[:,0]/(1000*1000), FAs[:,0]/(100), PHs[:,0]/(100), IDs[:,0])
-    dictionary = DictionaryParameters.GenerateFixedPercent(dictionaryName, percentStepSize=percentStepSize, includeB1=includeB1, t1Range=t1Range, t2Range=t2Range, b1Range=b1Range, b1Stepsize=b1Stepsize)
+    dictionary = DictionaryParameters.GenerateFixedStep(dictionaryName, fixedStepSize=fixedStepSize, includeB1=includeB1, t1Range=t1Range, t2Range=t2Range, b1Range=b1Range, b1Stepsize=b1Stepsize)
     simulation = Simulation(sequence, dictionary, phaseRange=phaseRange, numSpins=numSpins)
     simulation.Execute(numBatches=numBatches)
     simulation.CalculateSVD(desiredSVDPower=0.995)
@@ -151,21 +178,30 @@ def process(connection, config, metadata):
     coilImageData = PerformThroughplaneFFT(nufftResults)
     del nufftResults
     imageData, coilmaps = PerformWalshCoilCombination(coilImageData)
-    imageMask = GenerateMaskFromCoilmaps(coilmaps)
-    patternMatchResults, M0 = PerformPatternMatchingViaMaxInnerProduct(imageData*imageMask, dictionary, simulation)
+    #imageMask = GenerateMaskFromCoilmaps(coilmaps)
+    
+    patternMatchResults, M0, means, stddevs, confidence = CoilConsensusPatternMatching(coilImageData, dictionary, simulation)
     
     images = []
-    # Data is ordered [x y z] in patternMatchResults and M0. Need to reorder to [z y x] for ISMRMRD, and split T1/T2 apart
-    T1map = patternMatchResults['T1'] * 1000 # to milliseconds
+    T1map = means['T1'] * 1000 # to milliseconds
+    print(np.shape(T1map))
     T1image = PopulateISMRMRDImage(header, T1map, acqHeaders[0,0,0], 0, colormap="FingerprintingT1.pal", window=2500, level=1250)
     images.append(T1image)   
-    T2map = patternMatchResults['T2'] * 1000 # to milliseconds
-    T2image = PopulateISMRMRDImage(header, T2map, acqHeaders[0,0,0], 1, colormap="FingerprintingT2.pal", window=500, level=200)   
+    print(np.shape(confidence['T1']))
+    T1confidenceImage = PopulateISMRMRDImage(header, confidence['T1'], acqHeaders[0,0,0], 1)
+    images.append(T1confidenceImage)   
+
+    T2map = means['T2'] * 1000 # to milliseconds
+    print(np.shape(T2map))
+    T2image = PopulateISMRMRDImage(header, T2map, acqHeaders[0,0,0], 2, colormap="FingerprintingT2.pal", window=500, level=200)   
     images.append(T2image)   
- 
-    M0map = (np.abs(M0) / np.max(np.abs(M0))) * 2**12
-    M0image = PopulateISMRMRDImage(header, M0map, acqHeaders[0,0,0], 2)
-    images.append(M0image)   
+    print(np.shape(confidence['T2']))
+    T2confidenceImage = PopulateISMRMRDImage(header, confidence['T2'], acqHeaders[0,0,0], 3)
+    images.append(T2confidenceImage)   
+    
+    #M0map = (np.abs(M0) / np.max(np.abs(M0))) * 2**12
+    #M0Image = PopulateISMRMRDImage(header, M0map, acqHeaders[0,0,0], 4)
+    #images.append(M0Image)   
 
     connection.send_image(images)
     connection.send_close()
