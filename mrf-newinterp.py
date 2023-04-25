@@ -535,39 +535,39 @@ def process(connection, config, metadata):
     
     images = []
     # Data is ordered [x y z] in patternMatchResults and M0. Need to reorder to [z y x] for ISMRMRD, and split T1/T2 apart
-    T1map = AddText(patternMatchResults['T1'] * 1000) # to milliseconds
-    T1image = PopulateISMRMRDImage(header, T1map, acqHeaders[0,0,0], 0, window=2500, level=1250, comment="T1_ms")
-    images.append(T1image) 
+    #T1map = AddText((imageMask>0.1) * patternMatchResults['T1'] * 1000) # to milliseconds
+    #T1image = PopulateISMRMRDImage(header, T1map, acqHeaders[0,0,0], 0, window=2500, level=1250, comment="T1_ms")
+    #images.append(T1image) 
 
     # Data is ordered [x y z] in patternMatchResults and M0. Need to reorder to [z y x] for ISMRMRD, and split T1/T2 apart
-    T1map_interp = AddText(interpolatedResults['T1'] * 1000) # to milliseconds
-    T1image_interp = PopulateISMRMRDImage(header, T1map_interp, acqHeaders[0,0,0], 1, window=2500, level=1250, comment="T1_ms_interp")
+    T1map_interp = AddText((imageMask>0.1) * interpolatedResults['T1'] * 1000) # to milliseconds
+    T1image_interp = PopulateISMRMRDImage(header, T1map_interp, acqHeaders[0,0,0], 0, window=2500, level=1250, comment="T1_ms")
     images.append(T1image_interp)
 
-    T2map = AddText(patternMatchResults['T2'] * 1000) # to milliseconds
-    T2image = PopulateISMRMRDImage(header, T2map, acqHeaders[0,0,0], 2, window=500, level=200, comment="T2_ms")
-    images.append(T2image)   
+    #T2map = AddText((imageMask>0.1) * patternMatchResults['T2'] * 1000) # to milliseconds
+    #T2image = PopulateISMRMRDImage(header, T2map, acqHeaders[0,0,0], 2, window=500, level=200, comment="T2_ms")
+    #images.append(T2image)   
 
     # Data is ordered [x y z] in patternMatchResults and M0. Need to reorder to [z y x] for ISMRMRD, and split T1/T2 apart
-    T2map_interp = AddText(interpolatedResults['T2'] * 1000) # to milliseconds
-    T2image_interp = PopulateISMRMRDImage(header, T2map_interp, acqHeaders[0,0,0], 3, window=500, level=200, comment="T2_ms_interp")
+    T2map_interp = AddText((imageMask>0.1) * interpolatedResults['T2'] * 1000) # to milliseconds
+    T2image_interp = PopulateISMRMRDImage(header, T2map_interp, acqHeaders[0,0,0], 1, window=200, level=100, comment="T2_ms")
     images.append(T2image_interp)
 
-    M0map = AddText((np.abs(M0) / np.max(np.abs(M0))) * 2**12)
-    M0image = PopulateISMRMRDImage(header, M0map, acqHeaders[0,0,0], 4, comment="M0")
+    M0map = AddText((imageMask>0.1) * (np.abs(M0) / np.max(np.abs(M0))) * 2**12)
+    M0image = PopulateISMRMRDImage(header, M0map, acqHeaders[0,0,0], 2, comment="M0")
     images.append(M0image)   
 
-    if(np.size(B1map) != 0):
-        B1image = PopulateISMRMRDImage(header, B1map, acqHeaders[0,0,0], 5, comment="B1")
-        images.append(B1image)  
+    #if(np.size(B1map) != 0):
+    #    B1image = PopulateISMRMRDImage(header, B1map, acqHeaders[0,0,0], 5, comment="B1")
+    #    images.append(B1image)  
 
-    WMimage = PopulateISMRMRDImage(header, AddText(wmFractionMap), acqHeaders[0,0,0], 6, comment="WM_Fraction")
+    WMimage = PopulateISMRMRDImage(header, AddText((imageMask>0.1) * wmFractionMap), acqHeaders[0,0,0], 3, comment="WM_Fraction")
     images.append(WMimage)   
 
-    GMimage = PopulateISMRMRDImage(header, AddText(gmFractionMap), acqHeaders[0,0,0], 7, comment="GM_Fraction")
+    GMimage = PopulateISMRMRDImage(header, AddText((imageMask>0.1) * gmFractionMap), acqHeaders[0,0,0], 4, comment="GM_Fraction")
     images.append(GMimage)   
 
-    CSFimage = PopulateISMRMRDImage(header, AddText(csfFractionMap), acqHeaders[0,0,0], 8, comment="CSF_Fraction")
+    CSFimage = PopulateISMRMRDImage(header, AddText((imageMask>0.1) * csfFractionMap), acqHeaders[0,0,0], 5, comment="CSF_Fraction")
     images.append(CSFimage)  
 
     #MASKimage = PopulateISMRMRDImage(header, AddText(imageMask*1000), acqHeaders[0,0,0],9,comment="mask")
