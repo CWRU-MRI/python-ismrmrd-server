@@ -235,9 +235,9 @@ def process(connection, config, metadata):
     coefficientPatternMatches,coefficientM0 = BatchedPatternMatchViaMaxInnerProduct(timecourses.to(torch.cfloat), coefficientDictionaryEntries, torch.tensor(coefficientDictionaryTimecourses).to(torch.cfloat))
     normalizedCoefficients = coefficientPatternMatches.view((np.dtype('<f4'), len(coefficientPatternMatches.dtype.names)))
 
-    wmFractionMap = np.reshape(normalizedCoefficients[:,0], (matrixSize))
-    gmFractionMap = np.reshape(normalizedCoefficients[:,1], (matrixSize))
-    csfFractionMap = np.reshape(normalizedCoefficients[:,2], (matrixSize))
+    wmFractionMap = np.reshape(normalizedCoefficients[:,0], (matrixSize)) * 10000
+    gmFractionMap = np.reshape(normalizedCoefficients[:,1], (matrixSize)) * 10000
+    csfFractionMap = np.reshape(normalizedCoefficients[:,2], (matrixSize)) * 10000
 
     print(np.shape(wmFractionMap))
     print(np.shape(patternMatchResults['T1']))

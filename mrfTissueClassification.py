@@ -23,7 +23,28 @@ fixedStepSize=5; includeB1=False;  t1Range=(5,5000); t2Range=(5,500); b1Range=No
 phaseRange=(-np.pi, np.pi); numSpins=50; numBatches=20
 trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1916_norm.bin"
 densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
-     
+
+
+def ApplyXYZShift(svdData, header, acqHeaders, trajectories, matrixSizeOverride=None):
+    shape = np.shape(svdData)
+    numSVDComponents=shape[0]; numCoils=shape[1]; numPartitions=shape[2]; numReadoutPoints=shape[3]; numSpirals=shape[4]
+    shiftedSvdData = torch.zeros_like(svdData)
+    # For now, assume all spirals/partitions/etc have same offsets applied
+    (x_shift, y_shift, z_shift) = CalculateVoxelOffsetAcquisitionSpace(header, acqHeaders[0,0,0], matrixSizeOverride=matrixSizeOverride)
+    trajectories = torch.t(torch.tensor(np.array(trajectories)))
+    x = torch.zeros((numPartitions, numReadoutPoints, numSpirals));
+    y = torch.zeros((numPartitions, numReadoutPoints, numSpirals));
+    partitions = torch.moveaxis(torch.arange(-0.5, 0.5, 1/numPartitions).expand((numReadoutPoints, numSpirals, numPartitions)), -1,0)
+    trajectories = trajectories.expand((numPartitions, numReadoutPoints, numSpirals))
+    x = torch.cos(-2*torch.pi*(x_shift*trajectories.real + y_shift*trajectories.imag + z_shift*partitions));
+    y = torch.sin(-2*torch.pi*(x_shift*trajectories.real + y_shift*trajectories.imag + z_shift*partitions));
+    print("K-Space x/y/z shift applied:", x_shift, y_shift, z_shift)
+    return svdData*torch.complex(x,y)
+
+def ApplyZShiftImageSpace(imageData, header, acqHeaders, matrixSizeOverride=None):
+    (x_shift, y_shift, z_shift) = CalculateVoxelOffsetAcquisitionSpace(header, acqHeaders[0,0,0], matrixSizeOverride=matrixSizeOverride)
+    return torch.roll(imageData, int(z_shift), dims=2)
+
 # Takes data input as: [cha z y x], [z y x], or [y x]
 def PopulateISMRMRDImage(header, data, acquisition, image_index, colormap=None, window=None, level=None):
     image = ismrmrd.Image.from_array(data.transpose(), acquisition=acquisition, transpose=False)
@@ -172,7 +193,7 @@ def process(connection, config, metadata):
     ## Run the Reconstruction
     svdData = ApplySVDCompression(rawdata, simulation, device=torch.device("cpu"))
     (trajectoryBuffer,trajectories,densityBuffer,_) = LoadSpirals(trajectoryFilepath, densityFilepath, numSpirals)
-    svdData = ApplyXYZShiftKSpace(svdData, header, acqHeaders, trajectories)
+    svdData = ApplyXYZShift(svdData, header, acqHeaders, trajectories)
     nufftResults = PerformNUFFTs(svdData, trajectoryBuffer, densityBuffer, matrixSize, matrixSize*2)
     del svdData
     coilImageData = PerformThroughplaneFFT(nufftResults)

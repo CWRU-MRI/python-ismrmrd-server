@@ -13,21 +13,14 @@ from mrftools import *
 import sys
 from matplotlib import pyplot as plt
 import scipy
-from PIL import Image, ImageDraw, ImageFont
-
-import os
-import pickle
-import hashlib
 
 # Folder for debug output files
 debugFolder = "/tmp/share/debug"
 b1Folder = "/usr/share/b1-data"
-dictionaryFolder = "/usr/share/dictionary-data"
-
 
 # Configure dictionary simulation parameters
 dictionaryName = "5pct"
-percentStepSize=5; includeB1=False;  t1Range=(10,5000); t2Range=(1,500); b1Range=(0.5, 1.55); b1Stepsize=0.05; 
+percentStepSize=5; includeB1=False;  t1Range=(1,5000); t2Range=(1,500); b1Range=(0.5, 1.55); b1Stepsize=0.10; 
 phaseRange=(-np.pi, np.pi); numSpins=10; numBatches=50
 trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1916_norm.bin"
 densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
@@ -51,6 +44,7 @@ def ApplyXYZShift(svdData, header, acqHeaders, trajectories, matrixSizeOverride=
 def ApplyZShiftImageSpace(imageData, header, acqHeaders, matrixSizeOverride=None):
     (x_shift, y_shift, z_shift) = CalculateVoxelOffsetAcquisitionSpace(header, acqHeaders[0,0,0], matrixSizeOverride=matrixSizeOverride)
     return torch.roll(imageData, int(z_shift), dims=2)
+
 
 def BatchPatternMatchViaMaxInnerProduct(signalTimecourses, dictionaryEntries, dictionaryEntryTimecourses, voxelsPerBatch=500, device=None):
     if(device==None):
@@ -93,52 +87,113 @@ def BatchPatternMatchViaMaxInnerProduct(signalTimecourses, dictionaryEntries, di
     del simulationNorm
     return patternMatches, M0
 
+def BatchPatternMatchViaMaxInnerProductWithInterpolation(signalTimecourses, dictionaryEntries, dictionaryEntryTimecourses, dictionary1DIndexLookupTable, dictionary2DIndexLookupTable, voxelsPerBatch=500, device=None, radius=1):
+    if(device==None):
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
 
-def AddText(image, text="NOT FOR DIAGNOSTIC USE", fontSize=12):
-    matrixsize = np.shape(image)
-    img = Image.fromarray(np.uint8(np.zeros((matrixsize[0:2]))))
-    draw = ImageDraw.Draw(img)
-    font = ImageFont.truetype("terminess.ttf", fontSize)
-    _, _, w, h = draw.textbbox((0, 0), text, font=font)
-    draw.text(((matrixsize[0]-w)/2, h/2), text, (255), font=font)
-    overlay = np.array(img) > 0
-    repeated = np.repeat(overlay[:,:,np.newaxis], matrixsize[2],axis=2)
-    repeated = repeated + np.rot90(repeated)
-    repeated = repeated + np.rot90(repeated)    
-    repeated = repeated + np.rot90(repeated)    
-    image[repeated] = np.max(image)
-    return image
+    with torch.no_grad():
+        signalsTransposed = torch.t(signalTimecourses)
+        signalNorm = torch.linalg.norm(signalsTransposed, axis=1)[:,None]
+        normalizedSignals = signalsTransposed / signalNorm
+
+        simulationResults = torch.tensor(dictionaryEntryTimecourses, dtype=torch.complex64)
+        simulationNorm = torch.linalg.norm(simulationResults, axis=0)
+        normalizedSimulationResults = torch.t((simulationResults / simulationNorm)).to(device)
+
+        numBatches = int(np.shape(normalizedSignals)[0]/voxelsPerBatch)
+        patternMatches = np.empty((np.shape(normalizedSignals)[0]), dtype=DictionaryEntry)
+        interpolatedMatches = np.empty((np.shape(normalizedSignals)[0]), dtype=DictionaryEntry)
+
+        offsets = np.mgrid[-1*radius:radius+1, -1*radius:radius+1]
+        numNeighbors = np.shape(offsets)[1]*np.shape(offsets)[2]
+        
+        M0 = torch.zeros(np.shape(normalizedSignals)[0], dtype=torch.complex64)
+        with tqdm(total=numBatches) as pbar:
+            for i in range(numBatches):
+                firstVoxel = i*voxelsPerBatch
+                if i == (numBatches-1):
+                    lastVoxel = np.shape(normalizedSignals)[0]
+                else:
+                    lastVoxel = firstVoxel+voxelsPerBatch
+                batchSignals = normalizedSignals[firstVoxel:lastVoxel,:].to(device)
+                innerProducts = torch.inner(batchSignals, normalizedSimulationResults)
+                maxInnerProductIndices = torch.argmax(torch.abs(innerProducts), 1, keepdim=True)
+                maxInnerProducts = torch.take_along_dim(innerProducts,maxInnerProductIndices,dim=1).squeeze()
+                signalNorm_device = signalNorm[firstVoxel:lastVoxel].squeeze().to(device)
+                simulationNorm_device = simulationNorm.to(device)[maxInnerProductIndices.squeeze().to(torch.long)]
+                M0_device = signalNorm_device/simulationNorm_device
+                M0[firstVoxel:lastVoxel] = M0_device.cpu()
+                patternMatches[firstVoxel:lastVoxel] = dictionaryEntries[maxInnerProductIndices.squeeze().to(torch.long).cpu()].squeeze()
+
+                indices = dictionary2DIndexLookupTable[maxInnerProductIndices.squeeze().to(torch.long).cpu()].squeeze()
+
+                numVoxels = len(maxInnerProductIndices)
+                neighbor2DIndices = np.reshape(indices.repeat(numNeighbors,axis=1),(np.shape(indices)[0], np.shape(indices)[1],np.shape(offsets)[1], np.shape(offsets)[2])) + offsets
+                neighbor2DIndices[:,0,:,:] = np.clip(neighbor2DIndices[:,0,:,:], 0, np.shape(dictionary1DIndexLookupTable)[0]-1)
+                neighbor2DIndices[:,1,:,:] = np.clip(neighbor2DIndices[:,1,:,:], 0, np.shape(dictionary1DIndexLookupTable)[1]-1)
+
+                neighborDictionaryIndices = torch.tensor(dictionary1DIndexLookupTable[neighbor2DIndices[:,0,:,:], neighbor2DIndices[:,1,:,:]].reshape(numVoxels, -1))
+                neighborDictionaryEntries = dictionaryEntries[neighborDictionaryIndices]
+                neighborInnerProducts = torch.take_along_dim(innerProducts.cpu(),neighborDictionaryIndices,dim=1).squeeze()
+                
+                ## Perform pseudoinverse solve for dictionary-space parabolic function coefficients
+                innerProducts = torch.abs(neighborInnerProducts).to(torch.float32).unsqueeze(1)
+                T1s = torch.tensor(neighborDictionaryEntries['T1']); T2s = torch.tensor(neighborDictionaryEntries['T2'])
+                basis = torch.stack([T1s**2, T2s**2, T1s*T2s, T1s, T2s, torch.ones(np.shape(neighborDictionaryEntries))])
+                basis = torch.moveaxis(basis,1,0).squeeze()
+                pinv = torch.linalg.pinv(basis)
+                coefficients = torch.bmm(innerProducts, pinv).squeeze()
+
+                ## Perform inversion solve for partial derivatives of 0 of dictionary-space parabolic function
+                A = torch.zeros((np.shape(coefficients)[0], 2, 2))
+                f_T1T2 = torch.zeros((np.shape(coefficients)[0], 2))
+                A[:,0,0] = 2*coefficients[:,0]; A[:,0,1] = coefficients[:,2];  A[:,1,0] = coefficients[:,2];  A[:,1,1] =  2*coefficients[:,1]
+                f_T1T2[:,0] = -1*coefficients[:,3]; f_T1T2[:,1] = -1*coefficients[:,4]
+                invA = torch.linalg.pinv(A)
+                minimumT1T2 = torch.bmm(f_T1T2.unsqueeze(1), invA).squeeze().numpy()
+
+                interpolatedValues = np.zeros((numVoxels),dtype=DictionaryEntry)
+                for voxel in range(np.shape(minimumT1T2)[0]):
+                    interpolatedValues[voxel]['T1'] = minimumT1T2[voxel][0]
+                    interpolatedValues[voxel]['T2'] = minimumT1T2[voxel][1]
+                interpolatedMatches[firstVoxel:lastVoxel] = interpolatedValues
+                pbar.update(1)
+                del batchSignals, M0_device, signalNorm_device, simulationNorm_device
+
+        del normalizedSimulationResults, dictionaryEntryTimecourses, dictionaryEntries, signalsTransposed, signalNorm, normalizedSignals, simulationResults
+        del simulationNorm
+        return patternMatches,interpolatedMatches, M0
+
 
 def LoadB1Map(matrixSize, resampleToMRFMatrixSize=True, deinterleave=True, performBinning=True):
     # Using header, generate a unique b1 filename. This is temporary
     try:
         b1Filename = "testB1"
         b1Data = np.load(b1Folder + "/" + b1Filename +".npy")
+        b1MapSize = np.array(np.shape(b1Data))
+        print("B1 Input Size:", b1MapSize)
+        if deinterleave:
+            numSlices = b1MapSize[2]
+            deinterleaved = np.zeros_like(b1Data)
+            deinterleaved[:,:,np.arange(1,numSlices,2)] = b1Data[:,:,0:int(np.floor(numSlices/2))]
+            deinterleaved[:,:,np.arange(0,numSlices-1,2)] = b1Data[:,:,int(np.floor(numSlices/2)):numSlices]
+            b1Data = deinterleaved
+        if resampleToMRFMatrixSize:
+            b1Data = scipy.ndimage.zoom(b1Data, matrixSize/b1MapSize, order=5)
+        print("B1 Output Size:", np.shape(b1Data))
+        return b1Data
     except:
         print("No B1 map found")
-        return np.array([])
-
-    b1MapSize = np.array(np.shape(b1Data))
-    print("B1 Input Size:", b1MapSize)
-    if deinterleave:
-        numSlices = b1MapSize[2]
-        deinterleaved = np.zeros_like(b1Data)
-        deinterleaved[:,:,np.arange(1,numSlices,2)] = b1Data[:,:,0:int(np.floor(numSlices/2))]
-        deinterleaved[:,:,np.arange(0,numSlices-1,2)] = b1Data[:,:,int(np.floor(numSlices/2)):numSlices]
-        b1Data = deinterleaved
-    if resampleToMRFMatrixSize:
-        b1Data = scipy.ndimage.zoom(b1Data, matrixSize/b1MapSize, order=5)
-        b1Data = np.flip(b1Data, axis=2)
-        b1Data = np.rot90(b1Data, axes=(0,1))
-        b1Data = np.flip(b1Data, axis=0)
-    print("B1 Output Size:", np.shape(b1Data))
-    return b1Data
-        
+        return None
+    
 def performB1Binning(b1Data, b1Range, b1Stepsize, b1IdentityValue=800):
     b1Bins = np.arange(b1Range[0], b1Range[1], b1Stepsize)
     b1Clipped = np.clip(b1Data, np.min(b1Bins)*b1IdentityValue, np.max(b1Bins)*b1IdentityValue)
     b1Binned = b1Bins[np.digitize(b1Clipped, b1Bins*b1IdentityValue, right=True)]
-    print("Binned B1 Shape: ", np.shape(b1Binned))
+    print("Binned B1 Shape: ", b1Binned)
     return b1Binned
 
 def GenerateDictionaryLookupTables(dictionary):
@@ -158,6 +213,46 @@ def GenerateDictionaryLookupTables(dictionary):
         dictionary2DIndexLookupTable.append([T1index,T2index])
     dictionary2DIndexLookupTable = np.array(dictionary2DIndexLookupTable)
     return dictionary1DIndexLookupTable, dictionary2DIndexLookupTable
+
+def PatternMatchingViaMaxInnerProductWithInterpolation(combined, dictionary, simulation, voxelsPerBatch=500, b1Binned=None, device=None,):
+    if(device==None):
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+
+    dictionary1DIndexLookupTable, dictionary2DIndexLookupTable = GenerateDictionaryLookupTables(dictionary)
+    sizes = np.shape(combined)
+    numSVDComponents=sizes[0]; matrixSize=sizes[1:4]
+    patternMatches = np.empty((matrixSize), dtype=DictionaryEntry)
+    interpolatedMatches = np.empty((matrixSize), dtype=DictionaryEntry)
+    M0 = torch.zeros((matrixSize), dtype=torch.complex64)
+    if b1Binned is not None:
+        for uniqueB1 in np.unique(b1Binned):
+            print(uniqueB1)
+            if uniqueB1 == 0:
+                patternMatches[b1Binned==uniqueB1] = 0
+            else:
+                signalTimecourses = combined[:,b1Binned == uniqueB1]
+                simulationTimecourses = torch.t(torch.t(torch.tensor(simulation.truncatedResults))[(np.argwhere(dictionary.entries['B1'] == uniqueB1))].squeeze())
+                dictionaryEntries = dictionary.entries[(np.argwhere(dictionary.entries['B1'] == uniqueB1))]
+                signalTimecourses = combined[:,b1Binned == uniqueB1]
+                patternMatches[b1Binned == uniqueB1], interpolatedMatches[b1Binned == uniqueB1], M0[b1Binned == uniqueB1] = BatchPatternMatchViaMaxInnerProductWithInterpolation(signalTimecourses,dictionaryEntries,simulationTimecourses, dictionary1DIndexLookupTable, dictionary2DIndexLookupTable, voxelsPerBatch=voxelsPerBatch, device=device)
+    else:
+        signalTimecourses = torch.reshape(combined, (numSVDComponents,-1))
+        if(dictionary.entries['B1'][0]):
+            simulationTimecourses = torch.t(torch.t(torch.tensor(simulation.truncatedResults))[(np.argwhere(dictionary.entries['B1'] == 1))].squeeze())
+            dictionaryEntries = dictionary.entries[(np.argwhere(dictionary.entries['B1'] == 1))]
+        else:   
+            simulationTimecourses = torch.tensor(simulation.truncatedResults)
+            dictionaryEntries = dictionary.entries
+        patternMatches, interpolatedMatches, M0 = BatchPatternMatchViaMaxInnerProductWithInterpolation(signalTimecourses, dictionaryEntries, simulationTimecourses, dictionary1DIndexLookupTable, dictionary2DIndexLookupTable, voxelsPerBatch=voxelsPerBatch, device=device)
+    patternMatches = np.reshape(patternMatches, (matrixSize))
+    interpolatedMatches = np.reshape(interpolatedMatches, (matrixSize))
+    M0 = np.reshape(M0, (matrixSize)).numpy()
+    M0 = np.nan_to_num(M0)
+    return patternMatches, interpolatedMatches, M0
+
 
 def PatternMatchingViaMaxInnerProduct(combined, dictionary, simulation, voxelsPerBatch=500, b1Binned=None, device=None,):
     if(device==None):
@@ -306,38 +401,41 @@ def process(connection, config, metadata):
         logging.exception(e)   
         connection.send_close()     
 
+
     B1map = LoadB1Map(matrixSize)
-    if(np.size(B1map)!=0):
+    if(B1map != None):
         B1map_binned = performB1Binning(B1map, b1Range, b1Stepsize, b1IdentityValue=800)
-        dictionary = DictionaryParameters.GenerateFixedPercent(dictionaryName, percentStepSize=percentStepSize, t1Range=t1Range, t2Range=t2Range, includeB1=True, b1Range=b1Range, b1Stepsize=b1Stepsize)
+        dictionary = DictionaryParameters.GenerateFixedPercent(dictionaryName, percentStepSize=percentStepSize, includeB1=includeB1, t1Range=t1Range, t2Range=t2Range, includeB1=True, b1Range=b1Range, b1Stepsize=b1Stepsize)
     else:
         B1map_binned = None
-        dictionary = DictionaryParameters.GenerateFixedPercent(dictionaryName, percentStepSize=percentStepSize, t1Range=t1Range, t2Range=t2Range, includeB1=False, b1Range=None, b1Stepsize=None)
+        dictionary = DictionaryParameters.GenerateFixedPercent(dictionaryName, percentStepSize=percentStepSize, includeB1=includeB1, t1Range=t1Range, t2Range=t2Range, includeB1=False, b1Range=None, b1Stepsize=None)
 
     ## Simulate the Dictionary
     sequence = SequenceParameters("on-the-fly", SequenceType.FISP)
     sequence.Initialize(TRs[:,0]/(1000*1000), TEs[:,0]/(1000*1000), FAs[:,0]/(100), PHs[:,0]/(100), IDs[:,0])
-    sequenceHash = hashlib.sha256(pickle.dumps(sequence)).hexdigest()
-    dictionaryPath = dictionaryFolder+ "/" +sequenceHash+".sequence"
-    print(dictionaryPath)
+    dictionary = DictionaryParameters.GenerateFixedPercent(dictionaryName, percentStepSize=percentStepSize, includeB1=includeB1, t1Range=t1Range, t2Range=t2Range, b1Range=b1Range, b1Stepsize=b1Stepsize)
+    simulation = Simulation(sequence, dictionary, phaseRange=phaseRange, numSpins=numSpins)
+    simulation.Execute(numBatches=numBatches)
+    simulation.CalculateSVD(desiredSVDPower=0.995)
+    print("Simulated", numSpirals*numSets, "timepoints")
+    del simulation.results
 
-    ## Check if dictionary already exists
-    if (os.path.isfile(dictionaryPath)):
-        print("Dictionary already exists. Using local copy.")
-        filehandler = open(dictionaryPath,'rb')
-        simulation = pickle.load(filehandler) 
-        filehandler.close()
+    ## Setup for parabolic interpolation
+    uniqueT1s = np.unique(dictionary.entries['T1'])
+    uniqueT2s = np.unique(dictionary.entries['T2'])
 
-    else:        
-        print("Dictionary not found. Simulating. ")
-        simulation = Simulation(sequence, dictionary, phaseRange=phaseRange, numSpins=numSpins)
-        simulation.Execute(numBatches=numBatches)
-        simulation.CalculateSVD(desiredSVDPower=0.98)
-        print("Simulated", numSpirals*numSets, "timepoints")
-        del simulation.results
-        filehandler = open(dictionaryPath, 'wb')
-        pickle.dump(simulation, filehandler)
-        filehandler.close()
+    dictionary2DIndexLookupTable = []
+    dictionaryEntries2D = np.zeros((len(uniqueT1s), len(uniqueT2s)), dtype=DictionaryEntry)
+    dictionary1DIndexLookupTable = np.zeros((len(uniqueT1s), len(uniqueT2s)), dtype=int)
+
+    for dictionaryIndex in tqdm(range(len(dictionary.entries))):
+        entry = dictionary.entries[dictionaryIndex]
+        T1index = np.where(uniqueT1s == entry['T1'])[0]
+        T2index = np.where(uniqueT2s == entry['T2'])[0]
+        dictionaryEntries2D[T1index, T2index] = entry
+        dictionary1DIndexLookupTable[T1index, T2index] = dictionaryIndex
+        dictionary2DIndexLookupTable.append([T1index,T2index]);
+    dictionary2DIndexLookupTable = np.array(dictionary2DIndexLookupTable)
 
     ## Run the Reconstruction
     svdData = ApplySVDCompression(rawdata, simulation, device=torch.device("cpu"))
@@ -349,15 +447,14 @@ def process(connection, config, metadata):
     del nufftResults
     imageData, coilmaps = PerformWalshCoilCombination(coilImageData)
     imageMask = GenerateMaskFromCoilmaps(coilmaps)
-
-    print("Starting normal pattern match")
-    patternMatchResults, M0 = PatternMatchingViaMaxInnerProduct(imageData*imageMask, dictionary, simulation, b1Binned = B1map_binned)
-    print("Finished normal pattern match")
+    print("Starting interpolated pattern match")
+    patternMatchResults, interpolatedResults, M0 = PatternMatchingViaMaxInnerProductWithInterpolation(imageData*imageMask, dictionary, simulation, b1Binned = B1map_binned)
+    print("Finished interpolated pattern match")
 
     # Generate Classification Maps from Timecourses and Known Tissue Timecourses
 
 ######################################
-    print("Starting WM/GM/CSF Seperation")
+
     ## Run for all pixels
     maskedImages = imageData*imageMask
     shape = np.shape(maskedImages)
@@ -412,38 +509,43 @@ def process(connection, config, metadata):
     csfFractionMap = np.reshape(normalizedCoefficients[:,2], (matrixSize)) * 10000
 
 ######################################
-    print("emitting images")
+
     images = []
     # Data is ordered [x y z] in patternMatchResults and M0. Need to reorder to [z y x] for ISMRMRD, and split T1/T2 apart
     T1map = patternMatchResults['T1'] * 1000 # to milliseconds
-    T1image = PopulateISMRMRDImage(header, AddText(T1map), acqHeaders[0,0,0], 0, window=2500, level=1250, comment="T1_ms")
-    images.append(T1image)  
+    #T1image = PopulateISMRMRDImage(header, T1map, acqHeaders[0,0,0], 0, colormap="FingerprintingT1.pal", window=2500, level=1250)
+    T1image = PopulateISMRMRDImage(header, T1map, acqHeaders[0,0,0], 0, window=2500, level=1250, comment="T1_ms")
+    images.append(T1image)   
+
+    T1mapInterpolated = interpolatedResults['T1'] * 1000 # to milliseconds
+    T1imageInterpolated = PopulateISMRMRDImage(header, T1mapInterpolated, acqHeaders[0,0,0], 1, window=2500, level=1250, comment="T1_ms_interpolated")
+    images.append(T1imageInterpolated)   
 
     T2map = patternMatchResults['T2'] * 1000 # to milliseconds
-    T2image = PopulateISMRMRDImage(header, AddText(T2map), acqHeaders[0,0,0], 2, window=500, level=200, comment="T2_ms")
+    #T2image = PopulateISMRMRDImage(header, T2map, acqHeaders[0,0,0], 1, colormap="FingerprintingT2.pal", window=500, level=200)   
+    T2image = PopulateISMRMRDImage(header, T2map, acqHeaders[0,0,0], 2, window=500, level=200, comment="T2_ms")
     images.append(T2image)   
+    
+    T2mapInterpolated = interpolatedResults['T2'] * 1000 # to milliseconds
+    T2imageInterpolated = PopulateISMRMRDImage(header, T2mapInterpolated, acqHeaders[0,0,0], 3, window=500, level=200, comment="T2_ms_interpolated")
+    images.append(T2imageInterpolated) 
 
     M0map = (np.abs(M0) / np.max(np.abs(M0))) * 2**12
-    M0image = PopulateISMRMRDImage(header, AddText(M0map), acqHeaders[0,0,0], 3, comment="M0")
+    M0image = PopulateISMRMRDImage(header, M0map, acqHeaders[0,0,0], 4, comment="M0")
     images.append(M0image)   
 
-    if(np.size(B1map) != 0):
-        B1image = PopulateISMRMRDImage(header, AddText(B1map), acqHeaders[0,0,0], 5, comment="B1")
+    if(B1map):
+        B1image = PopulateISMRMRDImage(header, B1map, acqHeaders[0,0,0], 5, comment="B1")
         images.append(B1image)  
 
-    WMimage = PopulateISMRMRDImage(header, AddText(wmFractionMap), acqHeaders[0,0,0], 5, comment="WM_Fraction")
+    WMimage = PopulateISMRMRDImage(header, wmFractionMap, acqHeaders[0,0,0], 6, comment="WM_Fraction")
     images.append(WMimage)   
 
-    GMimage = PopulateISMRMRDImage(header, AddText(gmFractionMap), acqHeaders[0,0,0], 6, comment="GM_Fraction")
+    GMimage = PopulateISMRMRDImage(header, gmFractionMap, acqHeaders[0,0,0], 7, comment="GM_Fraction")
     images.append(GMimage)   
 
-    CSFimage = PopulateISMRMRDImage(header, AddText(csfFractionMap), acqHeaders[0,0,0], 7, comment="CSF_Fraction")
-    images.append(CSFimage)  
-    try:
-        print("Mask Image:", np.shape(imageMask))
-        MASKimage = PopulateISMRMRDImage(header, AddText(imageMask*1000), acqHeaders[0,0,0],8,comment="mask")
-        images.append(MASKimage)
-    except:
-        print("Couldn't send Mask Image")
+    CSFimage = PopulateISMRMRDImage(header, csfFractionMap, acqHeaders[0,0,0], 8, comment="CSF_Fraction")
+    images.append(CSFimage)   
+
     connection.send_image(images)
     connection.send_close()
