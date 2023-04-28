@@ -58,7 +58,7 @@ RUN mkdir -p /opt/code
 # Python MRD library
 # matplotlib is used by rgb.py and provides various visualization tools including colormaps
 # pydicom is used by dicom2mrd.py to parse DICOM data
-RUN pip3 install h5py ismrmrd==1.13.1 matplotlib pydicom pynetdicom tqdm fbpca
+RUN pip3 install h5py ismrmrd==1.13.1 matplotlib pydicom pynetdicom tqdm fbpca azure-data-tables
 
 RUN pip3 uninstall -y Pillow && pip3 install --no-cache-dir Pillow 
 
@@ -97,7 +97,7 @@ WORKDIR /opt/code/python-ismrmrd-server
 
 #CMD [ "python3", "/opt/code/python-ismrmrd-server/main.py", "-v", "-H=0.0.0.0", "-p=9002", "-l=/tmp/python-ismrmrd-server.log"]
 
-ENTRYPOINT [ "python3", "/opt/code/python-ismrmrd-server/main.py", "-v", "-H=0.0.0.0", "-p=9002", "-l=/tmp/python-ismrmrd-server.log"]
+ENTRYPOINT [ "python3", "/opt/code/python-ismrmrd-server/main.py", "-H=0.0.0.0", "-p=9002", "-l=/tmp/python-ismrmrd-server.log"]
 
 # Replace the above CMD with this ENTRYPOINT to allow allow "docker stop"
 # commands to be passed to the server.  This is useful for deployments, but

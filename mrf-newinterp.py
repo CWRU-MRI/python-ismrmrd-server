@@ -23,6 +23,9 @@ import os
 import pickle
 import hashlib
 
+import azureLogging
+import time
+ 
 
 # Folder for debug output files
 debugFolder = "/tmp/share/debug"
@@ -35,6 +38,10 @@ percentStepSize=5; includeB1=False;  t1Range=(10,4000); t2Range=(1,500); b1Range
 phaseRange=(-np.pi, np.pi); numSpins=15; numBatches=100
 trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1916_norm.bin"
 densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
+
+# Azure logging configuration (temporary for testing, should be a secret in the cluster not plaintext)
+connectionString = "xxxxxxxxxx"
+tableName = "reconstructionLog"
 
 def ApplyXYZShift(svdData, header, acqHeaders, trajectories, matrixSizeOverride=None):
     shape = np.shape(svdData)
@@ -419,6 +426,8 @@ def GenerateClassificationMaps(imageData, dictionary, simulation, matrixSize):
             
 #metadata should be of type ismrmrd.xsd.ismrmrdHeader()
 def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
+    startTime = time.time()
+
     logging.debug("Config: %s", config)
     header = metadata
 
@@ -438,6 +447,10 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     except:
         logging.info("Failed to construct B1Map filename. Saving as B1Map_fallback")
         b1Filename = f"B1Map_fallback"
+
+
+    table_client = azureLogging.setupClient(connectionString, tableName)
+    currentScanEntity = azureLogging.setupEntity(table_client, deviceSerialNumber, studyID, measUID)
 
     enc = metadata.encoding[0]
 
@@ -488,7 +501,7 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
                 timepoint = acq.user_int[0]
                 TRs[timepoint, measuredPartition] = acq.user_int[2]            
                 TEs[timepoint, measuredPartition] = acq.user_int[3]
-                FAs[timepoint, measuredPartition] = acq.user_int[4] # Use requested FA
+                FAs[timepoint, measuredPartition] = acq.user_int[4]  # Use requested FA
                 #FAs[timepoint, measuredPartition] = acq.user_int[5] # Use actual FA not requested
                 PHs[timepoint, measuredPartition] = acq.user_int[6] 
                 IDs[timepoint, measuredPartition] = spiral
@@ -506,6 +519,10 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     except Exception as e:
         logging.exception(e)   
         connection.send_close()   
+    
+    rawDataTransferFinishTime = time.time()
+    azureLogging.updateEntity(table_client, currentScanEntity, 'RawDataTransferTime', rawDataTransferFinishTime-startTime)
+    azureLogging.updateEntity(table_client, currentScanEntity, 'AllDataReceived', True)
 
     B1map = LoadB1Map(matrixSize, b1Filename)
     if(np.size(B1map)!=0):
@@ -515,6 +532,9 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
         B1map_binned = None
         dictionary = DictionaryParameters.GenerateFixedPercent(dictionaryName, percentStepSize=percentStepSize, t1Range=t1Range, t2Range=t2Range, includeB1=False, b1Range=None, b1Stepsize=None)
 
+    if(B1map_binned is not None):
+        azureLogging.updateEntity(table_client, currentScanEntity, 'B1CorrectionUsed', True)
+
     ## Initialize the Sequence
     sequence = SequenceParameters("largescale", SequenceType.FISP)
     sequence.Initialize(TRs[:,0]/(1000*1000), TEs[:,0]/(1000*1000), FAs[:,0]/(100), PHs[:,0]/(100), IDs[:,0])
@@ -523,6 +543,8 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     dictionaryPath = dictionaryFolder+"/"+simulationHash+".simulation"
     logging.info(f"Dictionary Path: {dictionaryPath}")
     Path(dictionaryFolder).mkdir(parents=True, exist_ok=True)
+
+    azureLogging.updateEntity(table_client, currentScanEntity, 'SimulationHashUsedForReconstruction', simulationHash)
 
     ## Check if dictionary already exists
     if (os.path.isfile(dictionaryPath)):
@@ -542,6 +564,8 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
         pickle.dump(simulation, filehandler)
         filehandler.close()
 
+    ## If dictionary simulation is new, upload to Azure so it will exist forever?
+
     ## Run the Reconstruction
     svdData = ApplySVDCompression(rawdata, simulation, device=torch.device("cpu"))
     (trajectoryBuffer,trajectories,densityBuffer,_) = LoadSpirals(trajectoryFilepath, densityFilepath, numSpirals)
@@ -554,7 +578,10 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     imageMask = GenerateRadialMask(coilImageData)
     patternMatchResults, interpolatedResults, M0 = PatternMatchingViaMaxInnerProductWithInterpolation(imageData, dictionary, simulation, b1Binned = B1map_binned, voxelsPerBatch=2000)
     (wmFractionMap, gmFractionMap, csfFractionMap) = GenerateClassificationMaps(imageData, dictionary, simulation, matrixSize)
-    
+    reconstructionFinishTime = time.time()
+    azureLogging.updateEntity(table_client, currentScanEntity, 'AllImagesReconstructed', True)
+    azureLogging.updateEntity(table_client, currentScanEntity, 'ReconstructionTime', reconstructionFinishTime-rawDataTransferFinishTime)
+
     ## Send out results
     
     images = []
@@ -598,4 +625,10 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     #images.append(MASKimage)
 
     connection.send_image(images)
+    imageTransferFinishTime = time.time()
+    azureLogging.updateEntity(table_client, currentScanEntity, 'AllImagesReturnedToScanner', True)
+    azureLogging.updateEntity(table_client, currentScanEntity, 'ImageTransferTime', imageTransferFinishTime-reconstructionFinishTime)
+
+
+
     connection.send_close()
