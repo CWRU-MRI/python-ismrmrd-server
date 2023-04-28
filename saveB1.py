@@ -17,13 +17,19 @@ b1Folder = "/usr/share/b1-data"
 #metadata should be of type ismrmrd.xsd.ismrmrdHeader()
 def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     #logging.info("Config: \n%s", config)
-    logging.info("Metadata: \n%s", metadata)
+    # logging.info("Metadata: \n%s", metadata)
 
-    #patientID = metadata.subjectInformation.patientID
-    #logging.info(f"Patient ID: {patientID}")
-
-    #deviceSerialNumber = metadata.acquisitionSystemInformation.deviceSerialNumber
-    #logging.info(f"Device Serial Number: {deviceSerialNumber}")
+    patientID = metadata.subjectInformation.patientID
+    logging.info(f"Patient ID: {patientID}")
+    
+    measID = metadata.measurementInformation.measurementID
+    measIDComponents = measID.split("_")
+    deviceSerialNumber = measIDComponents[0]
+    studyID = measIDComponents[2]
+    measUID = measIDComponents[3]
+    logging.info(f"Device Serial Number: {deviceSerialNumber}")
+    logging.info(f"Study ID: {studyID}")
+    logging.info(f"Measurement UID: {measUID}")
 
     # Metadata should be MRD formatted header, but may be a string
     # if it failed conversion earlier
@@ -96,7 +102,7 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     finally:
         connection.send_close()
 
-def process_image(images, connection, config, metadata):
+def process_image(images, connection, config,  metadata:ismrmrd.xsd.ismrmrdHeader):
     #logging.debug("Processing data with %d images of type %s", len(images), ismrmrd.get_dtype_from_data_type(images[0].data_type))
    
     # Note: The MRD Image class stores data as [cha z y x]
@@ -111,7 +117,24 @@ def process_image(images, connection, config, metadata):
 
     #print(head)
     # Using header, generate a unique b1 filename. This is temporary
-    b1Filename = "B1Map"
+    #b1Filename = "B1Map"
+
+    try:
+        patientID = metadata.subjectInformation.patientID
+        logging.info(f"Patient ID: {patientID}")
+        measID = metadata.measurementInformation.measurementID
+        measIDComponents = measID.split("_")
+        deviceSerialNumber = measIDComponents[0]
+        studyID = measIDComponents[2]
+        measUID = measIDComponents[3]
+        logging.info(f"Device Serial Number: {deviceSerialNumber}")
+        logging.info(f"Study ID: {studyID}")
+        logging.info(f"Measurement UID: {measUID}")
+
+        b1Filename = f"B1Map_{deviceSerialNumber}_{studyID}"
+    except:
+        logging.info("Failed to construct B1Map filename. Saving as B1Map_fallback")
+        b1Filename = f"B1Map_fallback"
 
     # Display MetaAttributes for first image
     #logging.debug("MetaAttributes[0]: %s", ismrmrd.Meta.serialize(meta[0]))

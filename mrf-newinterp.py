@@ -202,14 +202,18 @@ def AddText(image, text="NOT FOR DIAGNOSTIC USE", fontSize=12):
     image[repeated] = np.max(image)
     return image
 
-def LoadB1Map(matrixSize, resampleToMRFMatrixSize=True, deinterleave=True, deleteB1File=True):
+def LoadB1Map(matrixSize, b1Filename, resampleToMRFMatrixSize=True, deinterleave=True, deleteB1File=True):
     # Using header, generate a unique b1 filename. This is temporary
     try:
-        b1Filename = "B1Map"
         b1Data = np.load(b1Folder + "/" + b1Filename +".npy")
     except:
-        logging.info("No B1 map found")
-        return np.array([])
+        logging.info("No B1 map found with requested filename. Trying fallback. ")
+        try:
+            b1Filename = f"B1Map_fallback"
+            b1Data = np.load(b1Folder + "/" + b1Filename +".npy")
+        except:
+            logging.info("No B1 map found with fallback filename. Skipping B1 correction.")
+            return np.array([])
 
     b1MapSize = np.array(np.shape(b1Data))
     logging.info(f"B1 Input Size: {b1MapSize}")
@@ -418,11 +422,22 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     logging.debug("Config: %s", config)
     header = metadata
 
-    patientID = header.subjectInformation.patientID
-    logging.info(f"Patient ID: {patientID}")
+    try:
+        patientID = metadata.subjectInformation.patientID
+        logging.info(f"Patient ID: {patientID}")
+        measID = metadata.measurementInformation.measurementID
+        measIDComponents = measID.split("_")
+        deviceSerialNumber = measIDComponents[0]
+        studyID = measIDComponents[2]
+        measUID = measIDComponents[3]
+        logging.info(f"Device Serial Number: {deviceSerialNumber}")
+        logging.info(f"Study ID: {studyID}")
+        logging.info(f"Measurement UID: {measUID}")
 
-    deviceSerialNumber = header.acquisitionSystemInformation.deviceSerialNumber
-    logging.info(f"Device Serial Number: {deviceSerialNumber}")
+        b1Filename = f"B1Map_{deviceSerialNumber}_{studyID}"
+    except:
+        logging.info("Failed to construct B1Map filename. Saving as B1Map_fallback")
+        b1Filename = f"B1Map_fallback"
 
     enc = metadata.encoding[0]
 
@@ -473,7 +488,8 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
                 timepoint = acq.user_int[0]
                 TRs[timepoint, measuredPartition] = acq.user_int[2]            
                 TEs[timepoint, measuredPartition] = acq.user_int[3]
-                FAs[timepoint, measuredPartition] = acq.user_int[5] # Use actual FA not requested
+                FAs[timepoint, measuredPartition] = acq.user_int[4] # Use requested FA
+                #FAs[timepoint, measuredPartition] = acq.user_int[5] # Use actual FA not requested
                 PHs[timepoint, measuredPartition] = acq.user_int[6] 
                 IDs[timepoint, measuredPartition] = spiral
                 acqHeaders[undersampledPartition, spiral, set] = acqHeader
@@ -489,9 +505,9 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
                 rawdata[:, undersampledPartition, :, spiral, set] = readout
     except Exception as e:
         logging.exception(e)   
-        connection.send_close()     
+        connection.send_close()   
 
-    B1map = LoadB1Map(matrixSize)
+    B1map = LoadB1Map(matrixSize, b1Filename)
     if(np.size(B1map)!=0):
         B1map_binned = performB1Binning(B1map, b1Range, b1Stepsize, b1IdentityValue=800)
         dictionary = DictionaryParameters.GenerateFixedPercent(dictionaryName, percentStepSize=percentStepSize, t1Range=t1Range, t2Range=t2Range, includeB1=True, b1Range=b1Range, b1Stepsize=b1Stepsize)
