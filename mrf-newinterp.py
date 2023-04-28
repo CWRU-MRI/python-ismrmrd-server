@@ -202,10 +202,10 @@ def AddText(image, text="NOT FOR DIAGNOSTIC USE", fontSize=12):
     image[repeated] = np.max(image)
     return image
 
-def LoadB1Map(matrixSize, resampleToMRFMatrixSize=True, deinterleave=True, performBinning=True):
+def LoadB1Map(matrixSize, resampleToMRFMatrixSize=True, deinterleave=True, deleteB1File=True):
     # Using header, generate a unique b1 filename. This is temporary
     try:
-        b1Filename = "testB1"
+        b1Filename = "B1Map"
         b1Data = np.load(b1Folder + "/" + b1Filename +".npy")
     except:
         logging.info("No B1 map found")
@@ -225,6 +225,9 @@ def LoadB1Map(matrixSize, resampleToMRFMatrixSize=True, deinterleave=True, perfo
         b1Data = np.rot90(b1Data, axes=(0,1))
         b1Data = np.flip(b1Data, axis=0)
     logging.info(f"B1 Output Size: {np.shape(b1Data)}")
+    if(deleteB1File):
+        os.remove(b1Folder + "/" + b1Filename +".npy")     
+        logging.info(f"Deleted B1 File: {b1Filename}")
     return b1Data
         
 def performB1Binning(b1Data, b1Range, b1Stepsize, b1IdentityValue=800):
@@ -310,7 +313,7 @@ def PopulateISMRMRDImage(header, data, acquisition, image_index, colormap=None, 
     image.attribute_string = xml
     return image
 
-def GenerateRadialMask(coilImageData, svdNum = 0, angularResolution = 0.02, stepSize = 3, maxDecay = 10, featheringKernelSize=5):
+def GenerateRadialMask(coilImageData, svdNum = 0, angularResolution = 0.01, stepSize = 3, fillSize = 3, maxDecay = 15, featheringKernelSize=4):
     coilMax = np.max(np.abs(coilImageData[svdNum,:,:,:,:].cpu().numpy()), axis=0)
     threshold = np.mean(coilMax)
     maskIm = np.zeros(np.shape(coilMax))
@@ -329,7 +332,6 @@ def GenerateRadialMask(coilImageData, svdNum = 0, angularResolution = 0.02, step
                 radius += stepSize
                 pos = (center + [radius*np.cos(polarAngle), radius*np.sin(polarAngle)]).astype(int)
                 if(pos[0] > 0 and pos[0] < np.shape(coilMax)[1]-1 and pos[1] > 0 and pos[1] < np.shape(coilMax)[2]-1):
-                    fillSize = stepSize + 1
                     if coilMax[partition,pos[0],pos[1]] > threshold:
                         for histPos in historicalPos:
                             maskIm[partition, histPos[0]-fillSize:histPos[0]+fillSize, histPos[1]-fillSize:histPos[1]+fillSize] = 1
@@ -411,11 +413,17 @@ def GenerateClassificationMaps(imageData, dictionary, simulation, matrixSize):
     
     return (wmFractionMap, gmFractionMap, csfFractionMap)
             
-def process(connection, config, metadata):
+#metadata should be of type ismrmrd.xsd.ismrmrdHeader()
+def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     logging.debug("Config: %s", config)
-    logging.debug("Metadata: \n%s", metadata)
-    
     header = metadata
+
+    patientID = header.subjectInformation.patientID
+    logging.info(f"Patient ID: {patientID}")
+
+    deviceSerialNumber = header.acquisitionSystemInformation.deviceSerialNumber
+    logging.info(f"Device Serial Number: {deviceSerialNumber}")
+
     enc = metadata.encoding[0]
 
     numSpirals = enc.encodingLimits.kspace_encoding_step_1.maximum+1; logging.info(f"Spirals: {numSpirals}")

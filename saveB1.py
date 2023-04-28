@@ -13,8 +13,17 @@ from time import perf_counter
 # Folder for debug output files
 b1Folder = "/usr/share/b1-data"
 
-def process(connection, config, metadata):
+
+#metadata should be of type ismrmrd.xsd.ismrmrdHeader()
+def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     #logging.info("Config: \n%s", config)
+    logging.info("Metadata: \n%s", metadata)
+
+    #patientID = metadata.subjectInformation.patientID
+    #logging.info(f"Patient ID: {patientID}")
+
+    #deviceSerialNumber = metadata.acquisitionSystemInformation.deviceSerialNumber
+    #logging.info(f"Device Serial Number: {deviceSerialNumber}")
 
     # Metadata should be MRD formatted header, but may be a string
     # if it failed conversion earlier
@@ -102,7 +111,7 @@ def process_image(images, connection, config, metadata):
 
     #print(head)
     # Using header, generate a unique b1 filename. This is temporary
-    b1Filename = "testB1"
+    b1Filename = "B1Map"
 
     # Display MetaAttributes for first image
     #logging.debug("MetaAttributes[0]: %s", ismrmrd.Meta.serialize(meta[0]))
