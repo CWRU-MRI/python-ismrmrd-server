@@ -11,7 +11,7 @@ import signal
 defaults = {
     'host':           '0.0.0.0',
     'port':           9002,
-    'savedataFolder': '/tmp/share/saved_data'
+    'savedataFolder': '/usr/share/ismrmrd_data'
 }
 
 def main(args):

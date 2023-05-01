@@ -8,6 +8,7 @@ import ctypes
 import mrdhelper
 from datetime import datetime
 from pathlib import Path
+import shutil
 
 from tqdm import tqdm
 from mrftools import *
@@ -25,6 +26,7 @@ import hashlib
 
 import azureLogging
 import time
+from connection import Connection
  
 
 # Folder for debug output files
@@ -40,7 +42,7 @@ trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1
 densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
 
 # Azure logging configuration (temporary for testing, should be a secret in the cluster not plaintext)
-connectionString = "xxxxxxxxxx"
+connectionString = ""
 tableName = "reconstructionLog"
 
 def ApplyXYZShift(svdData, header, acqHeaders, trajectories, matrixSizeOverride=None):
@@ -423,9 +425,28 @@ def GenerateClassificationMaps(imageData, dictionary, simulation, matrixSize):
     csfFractionMap = np.reshape(normalizedCoefficients[:,2], (matrixSize)) * 10000
     
     return (wmFractionMap, gmFractionMap, csfFractionMap)
+
+def ThroughplaneFFT(nufftResults, device=None):
+    if(device==None):
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+    sizes = np.shape(nufftResults)
+    numSVDComponents=sizes[0]; numCoils=sizes[1]; numPartitions=sizes[2]; matrixSize=sizes[3:5]
+    images = torch.zeros((numSVDComponents, numCoils, numPartitions, matrixSize[0], matrixSize[1]), dtype=torch.complex64)
+    with tqdm(total=numSVDComponents) as pbar:
+        for svdComponent in np.arange(0, numSVDComponents):
+            nufft_device = nufftResults[svdComponent,:,:,:,:].to(device)
+            images[svdComponent,:,:,:,:] = torch.fft.ifftshift(torch.fft.ifft(nufft_device, dim=1), dim=1)
+            del nufft_device
+            pbar.update(1)
+    torch.cuda.empty_cache()
+    print("Images Shape:", np.shape(images))   
+    return images
             
 #metadata should be of type ismrmrd.xsd.ismrmrdHeader()
-def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
+def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     startTime = time.time()
 
     logging.debug("Config: %s", config)
@@ -442,7 +463,6 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
         logging.info(f"Device Serial Number: {deviceSerialNumber}")
         logging.info(f"Study ID: {studyID}")
         logging.info(f"Measurement UID: {measUID}")
-
         b1Filename = f"B1Map_{deviceSerialNumber}_{studyID}"
     except:
         logging.info("Failed to construct B1Map filename. Saving as B1Map_fallback")
@@ -524,6 +544,21 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     azureLogging.updateEntity(table_client, currentScanEntity, 'RawDataTransferTime', rawDataTransferFinishTime-startTime)
     azureLogging.updateEntity(table_client, currentScanEntity, 'AllDataReceived', True)
 
+    (isSavingEnabled,wasSavingSuccessful) = connection.get_dset_save_status()
+    if isSavingEnabled and wasSavingSuccessful:
+        rawDataFilename = f"MRFData_{deviceSerialNumber}_{studyID}.h5"
+        connection.rename_dset_save_file(rawDataFilename)
+        try:
+            updatedB1Path = os.path.join(connection.savedataFolder,b1Filename +".npy")
+            shutil.copyfile(b1Folder + "/" + b1Filename +".npy",updatedB1Path)
+        except:
+            logging.info("Copying B1 dataset failed")
+            return None
+        
+    rawDataSaveFinishTime = time.time()
+    azureLogging.updateEntity(table_client, currentScanEntity, 'RawDataSaveTime', rawDataSaveFinishTime-rawDataTransferFinishTime)
+    azureLogging.updateEntity(table_client, currentScanEntity, 'RawDataSaved', True)
+
     B1map = LoadB1Map(matrixSize, b1Filename)
     if(np.size(B1map)!=0):
         B1map_binned = performB1Binning(B1map, b1Range, b1Stepsize, b1IdentityValue=800)
@@ -572,7 +607,7 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     svdData = ApplyXYZShift(svdData, header, acqHeaders, trajectories)
     nufftResults = PerformNUFFTs(svdData, trajectoryBuffer, densityBuffer, matrixSize, matrixSize*2)
     del svdData
-    coilImageData = PerformThroughplaneFFT(nufftResults)
+    coilImageData = ThroughplaneFFT(nufftResults)
     del nufftResults
     imageData, coilmaps = PerformWalshCoilCombination(coilImageData)
     imageMask = GenerateRadialMask(coilImageData)
@@ -580,7 +615,7 @@ def process(connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     (wmFractionMap, gmFractionMap, csfFractionMap) = GenerateClassificationMaps(imageData, dictionary, simulation, matrixSize)
     reconstructionFinishTime = time.time()
     azureLogging.updateEntity(table_client, currentScanEntity, 'AllImagesReconstructed', True)
-    azureLogging.updateEntity(table_client, currentScanEntity, 'ReconstructionTime', reconstructionFinishTime-rawDataTransferFinishTime)
+    azureLogging.updateEntity(table_client, currentScanEntity, 'ReconstructionTime', reconstructionFinishTime-rawDataSaveFinishTime)
 
     ## Send out results
     

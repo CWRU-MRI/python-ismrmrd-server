@@ -19,6 +19,7 @@ class Connection:
         self.savedataFile   = savedataFile
         self.savedataFolder = savedataFolder
         self.savedataGroup  = savedataGroup
+        self.savedataSuccessful = False
         self.mrdFilePath    = None
         self.dset           = None
         self.socket         = socket
@@ -224,10 +225,28 @@ class Connection:
 
             logging.debug("Closing file %s", self.dset._file.filename)
             self.dset.close()
+            logging.info("Dataset saved to %s", self.dset._file.filename)
+            self.savedataSuccessful = True
             self.dset = None
 
         self.is_exhausted = True
         return
+        
+    def get_dset_save_status(self):
+        return (self.savedata, self.savedataSuccessful)
+    
+    def rename_dset_save_file(self, newFilename):
+        if self.savedata is True:
+            try:
+                updatedPath = os.path.join(self.savedataFolder,newFilename)
+                os.rename(self.mrdFilePath,updatedPath)
+                return updatedPath
+            except:
+                logging.info("Renaming saved dataset failed")
+                return None
+        else:
+            logging.info("Dataset cannot be renamed because saving is disabled")
+            return None
 
     # ----- MRD_MESSAGE_TEXT (5) -----------------------------------
     # This message contains arbitrary text data.
