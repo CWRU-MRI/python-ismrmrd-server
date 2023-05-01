@@ -58,7 +58,7 @@ RUN mkdir -p /opt/code
 # Python MRD library
 # matplotlib is used by rgb.py and provides various visualization tools including colormaps
 # pydicom is used by dicom2mrd.py to parse DICOM data
-RUN pip3 install h5py ismrmrd==1.13.1 matplotlib pydicom pynetdicom tqdm fbpca azure-data-tables
+RUN pip3 install h5py ismrmrd==1.13.1 matplotlib pydicom pynetdicom tqdm fbpca azure-data-tables azure-storage-blob
 
 RUN pip3 uninstall -y Pillow && pip3 install --no-cache-dir Pillow 
 

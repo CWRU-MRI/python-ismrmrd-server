@@ -1,6 +1,7 @@
 from azure.data.tables import TableServiceClient
 from datetime import datetime
 from azure.data.tables import UpdateMode
+from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
 
 def setupClient(connectionString, tableName):
     try:
@@ -13,7 +14,7 @@ def setupEntity(table_client: TableServiceClient, deviceSerialNumber, studyID, m
     try:
         currentScanEntity = {
             'PartitionKey': deviceSerialNumber,
-            'RowKey': studyID,
+            'RowKey': f"{studyID}_{measUID}",
             'DeviceSerialNumber': deviceSerialNumber,
             'StudyID': studyID,
             'MeasurementID': measUID, 
@@ -42,4 +43,12 @@ def updateEntity(table_client, entity, field, state):
         table_client.update_entity(mode=UpdateMode.REPLACE, entity=toUpdate)
     except:
         print("Azure Logging Update Failed")
-        
+
+def uploadFile(connectionString, containerName, deviceSerialNumber, studyID, measUID, filepath):
+    blob_service_client = BlobServiceClient.from_connection_string(connectionString)
+    blob_client = blob_service_client.get_blob_client(container=containerName, blob=f"{deviceSerialNumber}_{studyID}_{measUID}")
+    try:
+        with open(file=filepath, mode="rb") as data:
+            blob_client.upload_blob(data)
+    except:
+        print("Azure data upload failed for: ", filepath)

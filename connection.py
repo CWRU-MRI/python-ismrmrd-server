@@ -234,19 +234,6 @@ class Connection:
         
     def get_dset_save_status(self):
         return (self.savedata, self.savedataSuccessful)
-    
-    def rename_dset_save_file(self, newFilename):
-        if self.savedata is True:
-            try:
-                updatedPath = os.path.join(self.savedataFolder,newFilename)
-                os.rename(self.mrdFilePath,updatedPath)
-                return updatedPath
-            except:
-                logging.info("Renaming saved dataset failed")
-                return None
-        else:
-            logging.info("Dataset cannot be renamed because saving is disabled")
-            return None
 
     # ----- MRD_MESSAGE_TEXT (5) -----------------------------------
     # This message contains arbitrary text data.

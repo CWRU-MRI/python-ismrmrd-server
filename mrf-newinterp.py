@@ -42,7 +42,7 @@ trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1
 densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
 
 # Azure logging configuration (temporary for testing, should be a secret in the cluster not plaintext)
-connectionString = ""
+connectionString = "DefaultEndpointsProtocol=https;AccountName=largescalemrf;AccountKey=oBoEqEpNTJ5QvPHD/hEDoZ3usEGKDmy0WiEauhoQ73Z2XeGlWLMeQxRxI81bTVu4W8QVIgAyZ3eW+AStiOqsXw==;EndpointSuffix=core.windows.net"
 tableName = "reconstructionLog"
 
 def ApplyXYZShift(svdData, header, acqHeaders, trajectories, matrixSizeOverride=None):
@@ -546,13 +546,17 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
 
     (isSavingEnabled,wasSavingSuccessful) = connection.get_dset_save_status()
     if isSavingEnabled and wasSavingSuccessful:
-        rawDataFilename = f"MRFData_{deviceSerialNumber}_{studyID}.h5"
-        connection.rename_dset_save_file(rawDataFilename)
         try:
+            rawDataFilename = f"MRFData_{deviceSerialNumber}_{studyID}.h5"
+            updatedMRDPath = os.path.join(connection.savedataFolder,rawDataFilename)
+            shutil.copyfile(connection.mrdFilePath,updatedMRDPath)
+            azureLogging.uploadFile(connectionString, "raw-data-archive", deviceSerialNumber, studyID, measID, updatedMRDPath)
+
             updatedB1Path = os.path.join(connection.savedataFolder,b1Filename +".npy")
             shutil.copyfile(b1Folder + "/" + b1Filename +".npy",updatedB1Path)
+            azureLogging.uploadFile(connectionString, "b1-data-archive", deviceSerialNumber, studyID, measID, updatedB1Path)
         except:
-            logging.info("Copying B1 dataset failed")
+            logging.info("Saving raw data failed")
             return None
         
     rawDataSaveFinishTime = time.time()
