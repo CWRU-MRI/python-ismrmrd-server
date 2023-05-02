@@ -38,8 +38,7 @@ dictionaryFolder = "/usr/share/dictionary-data"
 dictionaryName = "5pct"
 percentStepSize=5; includeB1=False;  t1Range=(10,4000); t2Range=(1,500); b1Range=(0.5, 1.55); b1Stepsize=0.05; 
 phaseRange=(-np.pi, np.pi); numSpins=15; numBatches=100
-trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1916_norm.bin"
-densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
+
 
 # Azure logging configuration (temporary for testing, should be a secret in the cluster not plaintext)
 connectionString = ""
@@ -508,7 +507,22 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     #pilotToneData = np.zeros([numCoils, numUndersampledPartitions, numSpirals, numSets], dtype=np.complex64)
     acqHeaders = np.empty((numUndersampledPartitions, numSpirals, numSets), dtype=ismrmrd.Acquisition)
     discardPre=0;discardPost=0
-    
+
+    ## If dictionary simulation is new, upload to Azure so it will exist forever?
+    if matrixSize[0]==256:
+        trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1916_norm.bin"
+        densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
+        numToDiscard = 1916
+    elif matrixSize[0]==400:
+        trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV400_400_uplimit2890_norm.bin"
+        densityFilepath="mrf_dependencies/trajectories/DCW_FOV400_400_uplimit2890.bin"
+        numToDiscard = 2890
+    else:
+        print("Trajectory unknown, using default")
+        trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1916_norm.bin"
+        densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
+        numToDiscard = 1916
+        
     # Process data as it comes in
     try:
         for acq in connection:
@@ -532,7 +546,7 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
                 acqHeaders[undersampledPartition, spiral, set] = acqHeader
                 if rawdata is None:
                     discardPre = int(acqHeader.discard_pre / 2); logging.info(f"Discard Pre: {discardPre}") # Fix doubling in sequence - weird;
-                    discardPost = discardPre + 1916; logging.info(f"Discard Post: {discardPost}") # Fix in sequence
+                    discardPost = discardPre + numToDiscard; logging.info(f"Discard Post: {discardPost}") # Fix in sequence
                     numReadoutPoints = discardPost-discardPre; logging.info(f"Readout Points: {numReadoutPoints}")
                     rawdata = np.zeros([numCoils, numUndersampledPartitions, numReadoutPoints, numSpirals, numSets], dtype=np.complex64)
                 readout = acq.data[:, discardPre:discardPost]
@@ -607,7 +621,6 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
         pickle.dump(simulation, filehandler)
         filehandler.close()
 
-    ## If dictionary simulation is new, upload to Azure so it will exist forever?
 
     ## Run the Reconstruction
     svdData = ApplySVDCompression(rawdata, simulation, device=torch.device("cpu"))
