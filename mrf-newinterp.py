@@ -503,12 +503,18 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     PHs = np.zeros((numTimepoints, numMeasuredPartitions))
     IDs = np.zeros((numTimepoints, numMeasuredPartitions))
     
+    # Set up spirals
+    (trajectoryBuffer,trajectories,densityBuffer,_) = LoadSpirals(trajectoryFilepath, densityFilepath, numSpirals)
+
     # Set up raw data and header arrays
     rawdata = None
     #pilotToneData = np.zeros([numCoils, numUndersampledPartitions, numSpirals, numSets], dtype=np.complex64)
     acqHeaders = np.empty((numUndersampledPartitions, numSpirals, numSets), dtype=ismrmrd.Acquisition)
     discardPre=0;discardPost=0
-    
+
+    lastMeasuredPartition = 0
+    currentUndersampledPartitions = []
+
     # Process data as it comes in
     try:
         for acq in connection:
@@ -520,6 +526,66 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
                 acqHeader = acq.getHead()
                 measuredPartition = acq.idx.kspace_encode_step_2
                 undersampledPartition = acq.user_int[1]
+                if(measuredPartition != lastMeasuredPartition):                
+                    # If current partition has now become 1, set up dictionary
+                    if measuredPartition == 1:                                  
+                        B1map = LoadB1Map(matrixSize, b1Filename)
+                        if(np.size(B1map)!=0):
+                            B1map_binned = performB1Binning(B1map, b1Range, b1Stepsize, b1IdentityValue=800)
+                            dictionary = DictionaryParameters.GenerateFixedPercent(dictionaryName, percentStepSize=percentStepSize, t1Range=t1Range, t2Range=t2Range, includeB1=True, b1Range=b1Range, b1Stepsize=b1Stepsize)
+                        else:
+                            B1map_binned = None
+                            dictionary = DictionaryParameters.GenerateFixedPercent(dictionaryName, percentStepSize=percentStepSize, t1Range=t1Range, t2Range=t2Range, includeB1=False, b1Range=None, b1Stepsize=None)
+
+                        if(B1map_binned is not None):
+                            azureLogging.updateEntity(table_client, currentScanEntity, 'B1CorrectionUsed', True)
+
+                        ## Initialize the Sequence
+                        sequence = SequenceParameters("largescale", SequenceType.FISP)
+                        sequence.Initialize(TRs[:,0]/(1000*1000), TEs[:,0]/(1000*1000), FAs[:,0]/(100), PHs[:,0]/(100), IDs[:,0])
+                        simulation = Simulation(sequence, dictionary, phaseRange=phaseRange, numSpins=numSpins)
+                        simulationHash = hashlib.sha256(pickle.dumps(simulation)).hexdigest()
+                        dictionaryPath = dictionaryFolder+"/"+simulationHash+".simulation"
+                        logging.info(f"Dictionary Path: {dictionaryPath}")
+                        Path(dictionaryFolder).mkdir(parents=True, exist_ok=True)
+
+                        azureLogging.updateEntity(table_client, currentScanEntity, 'SimulationHashUsedForReconstruction', simulationHash)
+
+                        ## Check if dictionary already exists
+                        if (os.path.isfile(dictionaryPath)):
+                            logging.info("Dictionary already exists. Using local copy.")
+                            filehandler = open(dictionaryPath,'rb')
+                            simulation = pickle.load(filehandler) 
+                            filehandler.close()
+
+                        else:        
+                            ## Simulate the Dictionary
+                            logging.info("Dictionary not found. Simulating. ")
+                            simulation.Execute(numBatches=numBatches)
+                            simulation.CalculateSVD(desiredSVDPower=0.98)
+                            logging.info(f"Simulated {numSpirals*numSets} timepoints")
+                            del simulation.results
+                            filehandler = open(dictionaryPath, 'wb')
+                            pickle.dump(simulation, filehandler)
+                            filehandler.close()
+
+                        numSVDComponents=np.shape(simulation.truncationMatrix)[1]
+                        svdData = torch.zeros((numSVDComponents, numCoils, numUndersampledPartitions, numReadoutPoints, numSpirals), dtype=torch.complex64)
+                        nufftResults = torch.zeros((numSVDComponents, numCoils, numUndersampledPartitions, matrixSize[0], matrixSize[1]), dtype=torch.complex64)
+
+                    # Run partition-wise processing
+                    partitionsToCalculate = np.unique(currentUndersampledPartitions)
+                    logging.info(f"Calculating Partitions: {partitionsToCalculate}")
+                    svdData[:,:,partitionsToCalculate,:,:] = ApplySVDCompression(rawdata[:, partitionsToCalculate, :, :, :], simulation, device=torch.device("cpu"))
+                    svdData[:,:,partitionsToCalculate,:,:] = ApplyXYZShift(svdData[:,:,partitionsToCalculate,:,:], header, acqHeaders, trajectories)
+                    nufftResults[:,:,partitionsToCalculate,:,:] = PerformNUFFTs(svdData[:,:,partitionsToCalculate,:,:], trajectoryBuffer, densityBuffer, matrixSize, matrixSize*2)
+                
+                    # Move to next partition
+                    lastMeasuredPartition = measuredPartition
+                    currentUndersampledPartitions = []            
+
+                currentUndersampledPartitions.append(undersampledPartition)
+
                 spiral = acq.idx.kspace_encode_step_1
                 set = acq.idx.set
                 timepoint = acq.user_int[0]
@@ -548,72 +614,13 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     azureLogging.updateEntity(table_client, currentScanEntity, 'RawDataTransferTime', rawDataTransferFinishTime-startTime)
     azureLogging.updateEntity(table_client, currentScanEntity, 'AllDataReceived', True)
 
-    #(isSavingEnabled,wasSavingSuccessful) = connection.get_dset_save_status()
-    #if isSavingEnabled and wasSavingSuccessful:
-    #    try:
-    #        rawDataFilename = f"MRFData_{deviceSerialNumber}_{studyID}.h5"
-    #        updatedMRDPath = os.path.join(connection.savedataFolder,rawDataFilename)
-    #        shutil.copyfile(connection.mrdFilePath,updatedMRDPath)
-    #        azureLogging.uploadFile(connectionString, "raw-data-archive", deviceSerialNumber, studyID, measID, updatedMRDPath)
-
-    #        updatedB1Path = os.path.join(connection.savedataFolder,b1Filename +".npy")
-    #        shutil.copyfile(b1Folder + "/" + b1Filename +".npy",updatedB1Path)
-    #        azureLogging.uploadFile(connectionString, "b1-data-archive", deviceSerialNumber, studyID, measID, updatedB1Path)
-    #    except:
-    #        logging.info("Saving raw data failed")
-    #        return None
-        
-    #rawDataSaveFinishTime = time.time()
-    #azureLogging.updateEntity(table_client, currentScanEntity, 'RawDataSaveTime', rawDataSaveFinishTime-rawDataTransferFinishTime)
-    #azureLogging.updateEntity(table_client, currentScanEntity, 'RawDataSaved', True)
-
-    B1map = LoadB1Map(matrixSize, b1Filename)
-    if(np.size(B1map)!=0):
-        B1map_binned = performB1Binning(B1map, b1Range, b1Stepsize, b1IdentityValue=800)
-        dictionary = DictionaryParameters.GenerateFixedPercent(dictionaryName, percentStepSize=percentStepSize, t1Range=t1Range, t2Range=t2Range, includeB1=True, b1Range=b1Range, b1Stepsize=b1Stepsize)
-    else:
-        B1map_binned = None
-        dictionary = DictionaryParameters.GenerateFixedPercent(dictionaryName, percentStepSize=percentStepSize, t1Range=t1Range, t2Range=t2Range, includeB1=False, b1Range=None, b1Stepsize=None)
-
-    if(B1map_binned is not None):
-        azureLogging.updateEntity(table_client, currentScanEntity, 'B1CorrectionUsed', True)
-
-    ## Initialize the Sequence
-    sequence = SequenceParameters("largescale", SequenceType.FISP)
-    sequence.Initialize(TRs[:,0]/(1000*1000), TEs[:,0]/(1000*1000), FAs[:,0]/(100), PHs[:,0]/(100), IDs[:,0])
-    simulation = Simulation(sequence, dictionary, phaseRange=phaseRange, numSpins=numSpins)
-    simulationHash = hashlib.sha256(pickle.dumps(simulation)).hexdigest()
-    dictionaryPath = dictionaryFolder+"/"+simulationHash+".simulation"
-    logging.info(f"Dictionary Path: {dictionaryPath}")
-    Path(dictionaryFolder).mkdir(parents=True, exist_ok=True)
-
-    azureLogging.updateEntity(table_client, currentScanEntity, 'SimulationHashUsedForReconstruction', simulationHash)
-
-    ## Check if dictionary already exists
-    if (os.path.isfile(dictionaryPath)):
-        logging.info("Dictionary already exists. Using local copy.")
-        filehandler = open(dictionaryPath,'rb')
-        simulation = pickle.load(filehandler) 
-        filehandler.close()
-
-    else:        
-        ## Simulate the Dictionary
-        logging.info("Dictionary not found. Simulating. ")
-        simulation.Execute(numBatches=numBatches)
-        simulation.CalculateSVD(desiredSVDPower=0.98)
-        logging.info(f"Simulated {numSpirals*numSets} timepoints")
-        del simulation.results
-        filehandler = open(dictionaryPath, 'wb')
-        pickle.dump(simulation, filehandler)
-        filehandler.close()
-
     ## If dictionary simulation is new, upload to Azure so it will exist forever?
 
     ## Run the Reconstruction
-    svdData = ApplySVDCompression(rawdata, simulation, device=torch.device("cpu"))
-    (trajectoryBuffer,trajectories,densityBuffer,_) = LoadSpirals(trajectoryFilepath, densityFilepath, numSpirals)
-    svdData = ApplyXYZShift(svdData, header, acqHeaders, trajectories)
-    nufftResults = PerformNUFFTs(svdData, trajectoryBuffer, densityBuffer, matrixSize, matrixSize*2)
+    #svdData = ApplySVDCompression(rawdata, simulation, device=torch.device("cpu"))
+    #(trajectoryBuffer,trajectories,densityBuffer,_) = LoadSpirals(trajectoryFilepath, densityFilepath, numSpirals)
+    #svdData = ApplyXYZShift(svdData, header, acqHeaders, trajectories)
+    #nufftResults = PerformNUFFTs(svdData, trajectoryBuffer, densityBuffer, matrixSize, matrixSize*2)
     del svdData
     coilImageData = ThroughplaneFFT(nufftResults)
     del nufftResults
