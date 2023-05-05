@@ -1,3 +1,12 @@
+import torch
+import twixtools
+import tkinter as tk
+from tkinter import ttk
+from tkinter import filedialog as fd
+from tkinter.messagebox import showinfo
+import numpy as np
+import ismrmrd
+
 import ismrmrd
 import os
 import itertools
@@ -5,7 +14,6 @@ import logging
 import numpy as np
 import numpy.fft as fft
 import ctypes
-import mrdhelper
 from datetime import datetime
 from pathlib import Path
 import shutil
@@ -24,21 +32,16 @@ import os
 import pickle
 import hashlib
 
-import azureLogging
 import time
-from connection import Connection
  
 
 # Folder for debug output files
-debugFolder = "/tmp/share/debug"
-b1Folder = "/usr/share/b1-data"
-dictionaryFolder = "/usr/share/dictionary-data"
+dictionaryFolder = ""
 
 # Configure dictionary simulation parameters
 dictionaryName = "5pct"
 percentStepSize=5; includeB1=False;  t1Range=(10,4000); t2Range=(1,500); b1Range=(0.5, 1.55); b1Stepsize=0.05; 
 phaseRange=(-np.pi, np.pi); numSpins=15; numBatches=100
-
 
 # Azure logging configuration (temporary for testing, should be a secret in the cluster not plaintext)
 connectionString = ""
@@ -448,52 +451,33 @@ def ThroughplaneFFT(nufftResults, device=None):
     print("Images Shape:", np.shape(images))   
     return images
             
-#metadata should be of type ismrmrd.xsd.ismrmrdHeader()
-def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
-    startTime = time.time()
 
-    logging.debug("Config: %s", config)
-    header = metadata
+def runReconstruction(filename, b1Filename=""):
+    multi_twix = twixtools.read_twix(filename)
+    numSpirals = int(multi_twix[-1]['hdr']['Meas']['iNoOfFourierLines']); print(f'Spirals: {numSpirals}')
+    numMeasuredPartitions = int(multi_twix[-1]['hdr']['Meas']['iNoOfFourierPartitions']); print(f'Measured Partitions: {numMeasuredPartitions}')
+    numUndersampledPartitions = int(multi_twix[-1]['hdr']['MeasYaps']['sKSpace']['lPartitions']); print(f'Undersampled Partitions: {numUndersampledPartitions}')
+    centerMeasuredPartition =  int(numMeasuredPartitions/2); print(f'Center Measured Partition: {centerMeasuredPartition}') # Fix this to work with partial fourier
+    numSets = int(multi_twix[-1]['hdr']['Meas']['iNSet']); print(f'Sets: {numSets}')
+    numCoils = int(multi_twix[-1]['hdr']['Meas']['iMaxNoOfRxChannels']); print(f'Coils: {numCoils}')
+    xMatSize = multi_twix[-1]['hdr']['MeasYaps']['sKSpace']['lBaseResolution']
+    yMatSize = multi_twix[-1]['hdr']['MeasYaps']['sKSpace']['lPhaseEncodingLines']
+    zMatSize = multi_twix[-1]['hdr']['MeasYaps']['sKSpace']['lImagesPerSlab']
+    matrixSize = np.array([xMatSize, yMatSize, zMatSize]); print(f'Matrix Size: {matrixSize}')
+    xFOV = multi_twix[-1]['hdr']['MeasYaps']['sSliceArray']['asSlice'][0]['dReadoutFOV']
+    yFOV = multi_twix[-1]['hdr']['MeasYaps']['sSliceArray']['asSlice'][0]['dPhaseFOV']
+    zFOV = multi_twix[-1]['hdr']['MeasYaps']['sSliceArray']['asSlice'][0]['dThickness']
 
-    try:
-        patientID = metadata.subjectInformation.patientID
-        logging.info(f"Patient ID: {patientID}")
-        measID = metadata.measurementInformation.measurementID
-        measIDComponents = measID.split("_")
-        deviceSerialNumber = measIDComponents[0]
-        studyID = measIDComponents[2]
-        measUID = measIDComponents[3]
-        logging.info(f"Device Serial Number: {deviceSerialNumber}")
-        logging.info(f"Study ID: {studyID}")
-        logging.info(f"Measurement UID: {measUID}")
-        b1Filename = f"B1Map_{deviceSerialNumber}_{studyID}"
-    except:
-        logging.info("Failed to construct B1Map filename. Saving as B1Map_fallback")
-        b1Filename = f"B1Map_fallback"
-
-
-    table_client = azureLogging.setupClient(connectionString, tableName)
-    currentScanEntity = azureLogging.setupEntity(table_client, deviceSerialNumber, studyID, measUID)
-
-    enc = metadata.encoding[0]
-
-    numSpirals = enc.encodingLimits.kspace_encoding_step_1.maximum+1; logging.info(f"Spirals: {numSpirals}")
-    numMeasuredPartitions = enc.encodingLimits.kspace_encoding_step_2.maximum+1; logging.info(f"Measured Partitions: {numMeasuredPartitions}")
-    centerMeasuredPartition = enc.encodingLimits.kspace_encoding_step_2.center; logging.info(f"Center Measured Partition: {centerMeasuredPartition}") # Fix this in stylesheet
-    numSets = enc.encodingLimits.set.maximum+1; logging.info(f"Sets: {numSets}")
-    numCoils = header.acquisitionSystemInformation.receiverChannels; logging.info(f"Coils: {numCoils}")
-    matrixSize = np.array([enc.reconSpace.matrixSize.x,enc.reconSpace.matrixSize.y,enc.reconSpace.matrixSize.z]); logging.info(f"Matrix Size: {matrixSize}")
-    numUndersampledPartitions = matrixSize[2]; logging.info(f"Undersampled Partitions: {numUndersampledPartitions}")
     undersamplingRatio = 1
     if(numUndersampledPartitions > 1): # Hack, may not work for multislice 2d
         undersamplingRatio = int(numUndersampledPartitions / (centerMeasuredPartition * 2)); 
-        logging.info(f"Undersampling Ratio: {undersamplingRatio}")
+        print(f'Undersampling Ratio: {undersamplingRatio}')
     usePartialFourier = False
     if(numMeasuredPartitions*undersamplingRatio < numUndersampledPartitions):
         usePartialFourier = True
         partialFourierRatio = numMeasuredPartitions / (numUndersampledPartitions/undersamplingRatio)
-        logging.info(f"Measured partitions is less than expected for undersampling ratio - assuming partial fourier acquisition with ratio: {partialFourierRatio}")
-    
+        print(f'Measured partitions is less than expected for undersampling ratio - assuming partial fourier acquisition with ratio: {partialFourierRatio}')
+
     # Set up sequence parameter arrays
     numTimepoints = numSets*numSpirals
     TRs = np.zeros((numTimepoints, numMeasuredPartitions))
@@ -501,86 +485,79 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     FAs = np.zeros((numTimepoints, numMeasuredPartitions))
     PHs = np.zeros((numTimepoints, numMeasuredPartitions))
     IDs = np.zeros((numTimepoints, numMeasuredPartitions))
-    
+
     # Set up raw data and header arrays
     rawdata = None
-    #pilotToneData = np.zeros([numCoils, numUndersampledPartitions, numSpirals, numSets], dtype=np.complex64)
+    header = ismrmrd.xsd.ismrmrdHeader()
+    matrixSizeHeader=ismrmrd.xsd.matrixSizeType(xMatSize, yMatSize, zMatSize)
+    fovHeader=ismrmrd.xsd.fieldOfViewMm(xFOV, yFOV, zFOV)
+    encoding = ismrmrd.xsd.encodingType(reconSpace=ismrmrd.xsd.encodingSpaceType(matrixSize=matrixSizeHeader, fieldOfView_mm=fovHeader))
+    header.encoding.append(encoding)
     acqHeaders = np.empty((numUndersampledPartitions, numSpirals, numSets), dtype=ismrmrd.Acquisition)
     discardPre=0;discardPost=0
 
     ## If dictionary simulation is new, upload to Azure so it will exist forever?
     if matrixSize[0]==256:
-        trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1916_norm.bin"
-        densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
+        trajectoryFilepath='mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1916_norm.bin'
+        densityFilepath='mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin'
         numToDiscard = 1916
     elif matrixSize[0]==400:
-        trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV400_400_uplimit2890_norm.bin"
-        densityFilepath="mrf_dependencies/trajectories/DCW_FOV400_400_uplimit2890.bin"
+        trajectoryFilepath='mrf_dependencies/trajectories/SpiralTraj_FOV400_400_uplimit2890_norm.bin'
+        densityFilepath='mrf_dependencies/trajectories/DCW_FOV400_400_uplimit2890.bin'
         numToDiscard = 2890
     else:
-        print("Trajectory unknown, using default")
-        trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1916_norm.bin"
-        densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
+        print('Trajectory unknown, using default')
+        trajectoryFilepath='mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1916_norm.bin'
+        densityFilepath='mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin'
         numToDiscard = 1916
-        
+
     # Process data as it comes in
-    try:
-        for acq in connection:
-            if acq is None:
-                break
-            if acq.isFlagSet(ismrmrd.ACQ_IS_NOISE_MEASUREMENT) or acq.isFlagSet(ismrmrd.ACQ_IS_PHASECORR_DATA):
-                continue
-            else:
-                acqHeader = acq.getHead()
-                measuredPartition = acq.idx.kspace_encode_step_2
-                undersampledPartition = acq.user_int[1]
-                spiral = acq.idx.kspace_encode_step_1
-                set = acq.idx.set
-                timepoint = acq.user_int[0]
-                TRs[timepoint, measuredPartition] = acq.user_int[2]            
-                TEs[timepoint, measuredPartition] = acq.user_int[3]
-                FAs[timepoint, measuredPartition] = acq.user_int[4]  # Use requested FA
-                #FAs[timepoint, measuredPartition] = acq.user_int[5] # Use actual FA not requested
-                PHs[timepoint, measuredPartition] = acq.user_int[6] 
-                IDs[timepoint, measuredPartition] = spiral
-                acqHeaders[undersampledPartition, spiral, set] = acqHeader
-                if rawdata is None:
-                    discardPre = int(acqHeader.discard_pre / 2); logging.info(f"Discard Pre: {discardPre}") # Fix doubling in sequence - weird;
-                    discardPost = discardPre + numToDiscard; logging.info(f"Discard Post: {discardPost}") # Fix in sequence
-                    numReadoutPoints = discardPost-discardPre; logging.info(f"Readout Points: {numReadoutPoints}")
-                    rawdata = np.zeros([numCoils, numUndersampledPartitions, numReadoutPoints, numSpirals, numSets], dtype=np.complex64)
-                readout = acq.data[:, discardPre:discardPost]
-                #readout_fft = torch.fft.fft(torch.tensor(readout), dim=1)
-                #(pt_point,_) = torch.max(torch.abs(readout_fft), dim=1)
-                #pilotToneData[:, undersampledPartition, spiral, set] = pt_point.numpy() # Change from max to max of
-                rawdata[:, undersampledPartition, :, spiral, set] = readout
-    except Exception as e:
-        logging.exception(e)   
-        connection.send_close()   
+    for mdb in multi_twix[-1]['mdb']:
+        print(mdb)
+        if mdb is None:
+            break
+        if mdb.is_flag_set('NOISEADJSCAN') or mdb.is_flag_set('PHASCOR'):
+            print('Noise')
+            continue
+        else:
+            acqHeader = ismrmrd.Acquisition()
+            acqHeader.position[0] = mdb.mdh.SliceData.SlicePos.Sag
+            acqHeader.position[1] = mdb.mdh.SliceData.SlicePos.Cor
+            acqHeader.position[2] = mdb.mdh.SliceData.SlicePos.Tra
+            quat = mdb.mdh.SliceData.Quaternion
+            a = quat[0]; b = quat[1]; c = quat[2]; d = quat[3]
+
+            acqHeader.read_dir[0] = 1.0 - 2.0 * (b * b + c * c)
+            acqHeader.phase_dir[0] = 2.0 * (a * b - c * d)
+            acqHeader.slice_dir[0] = 2.0 * (a * c + b * d)
+            
+            acqHeader.read_dir[1] = 2.0 * (a * b + c * d)
+            acqHeader.phase_dir[1] = 1.0 - 2.0 * (a * a + c * c)
+            acqHeader.slice_dir[1] = 2.0 * (b * c - a * d)
+            
+            acqHeader.read_dir[2] = 2.0 * (a * c - b * d)
+            acqHeader.phase_dir[2] = 2.0 * (b * c + a * d)
+            acqHeader.slice_dir[2] = 1.0 - 2.0 * (a * a + b * b)
+            measuredPartition = mdb.mdh.Counter.Par
+            undersampledPartition = mdb.mdh.IceProgramPara[0]
+            spiral = mdb.mdh.Counter.Lin
+            set = mdb.mdh.Counter.Set
+            timepoint = mdb.mdh.IceProgramPara[1]
+            TRs[timepoint, measuredPartition] = mdb.mdh.IceProgramPara[2]          
+            TEs[timepoint, measuredPartition] = mdb.mdh.IceProgramPara[3]
+            FAs[timepoint, measuredPartition] = mdb.mdh.IceProgramPara[4]  # Use requested FA
+            #FAs[timepoint, measuredPartition] = acq.user_int[5] # Use actual FA not requested
+            PHs[timepoint, measuredPartition] = mdb.mdh.IceProgramPara[6] 
+            IDs[timepoint, measuredPartition] = spiral
+            acqHeaders[undersampledPartition, spiral, set] = acqHeader
+            if rawdata is None:
+                discardPre = int(mdb.mdh.CutOff.Pre / 2); print(f'Discard Pre: {discardPre}') # Fix doubling in sequence - weird;
+                discardPost = discardPre + numToDiscard; print(f'Discard Post: {discardPost}') # Fix in sequence
+                numReadoutPoints = discardPost-discardPre; print(f'Readout Points: {numReadoutPoints}')
+                rawdata = np.zeros([numCoils, numUndersampledPartitions, numReadoutPoints, numSpirals, numSets], dtype=np.complex64)
+            readout = mdb.data[:, discardPre:discardPost]
+            rawdata[:, undersampledPartition, :, spiral, set] = readout
     
-    rawDataTransferFinishTime = time.time()
-    azureLogging.updateEntity(table_client, currentScanEntity, 'RawDataTransferTime', rawDataTransferFinishTime-startTime)
-    azureLogging.updateEntity(table_client, currentScanEntity, 'AllDataReceived', True)
-
-    #(isSavingEnabled,wasSavingSuccessful) = connection.get_dset_save_status()
-    #if isSavingEnabled and wasSavingSuccessful:
-    #    try:
-    #        rawDataFilename = f"MRFData_{deviceSerialNumber}_{studyID}.h5"
-    #        updatedMRDPath = os.path.join(connection.savedataFolder,rawDataFilename)
-    #        shutil.copyfile(connection.mrdFilePath,updatedMRDPath)
-    #        azureLogging.uploadFile(connectionString, "raw-data-archive", deviceSerialNumber, studyID, measID, updatedMRDPath)
-
-    #        updatedB1Path = os.path.join(connection.savedataFolder,b1Filename +".npy")
-    #        shutil.copyfile(b1Folder + "/" + b1Filename +".npy",updatedB1Path)
-    #        azureLogging.uploadFile(connectionString, "b1-data-archive", deviceSerialNumber, studyID, measID, updatedB1Path)
-    #    except:
-    #        logging.info("Saving raw data failed")
-    #        return None
-        
-    #rawDataSaveFinishTime = time.time()
-    #azureLogging.updateEntity(table_client, currentScanEntity, 'RawDataSaveTime', rawDataSaveFinishTime-rawDataTransferFinishTime)
-    #azureLogging.updateEntity(table_client, currentScanEntity, 'RawDataSaved', True)
-
     B1map = LoadB1Map(matrixSize, b1Filename)
     if(np.size(B1map)!=0):
         B1map_binned = performB1Binning(B1map, b1Range, b1Stepsize, b1IdentityValue=800)
@@ -589,19 +566,18 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
         B1map_binned = None
         dictionary = DictionaryParameters.GenerateFixedPercent(dictionaryName, percentStepSize=percentStepSize, t1Range=t1Range, t2Range=t2Range, includeB1=False, b1Range=None, b1Stepsize=None)
 
-    if(B1map_binned is not None):
-        azureLogging.updateEntity(table_client, currentScanEntity, 'B1CorrectionUsed', True)
-
     ## Initialize the Sequence
     sequence = SequenceParameters("largescale", SequenceType.FISP)
+    print("TRs:", np.min(TRs), np.max(TRs))
+    print("TEs:", np.min(TEs), np.max(TEs))
+    print("FAs:", np.min(FAs), np.max(FAs))
+    print("IDs:", np.min(IDs), np.max(IDs))
     sequence.Initialize(TRs[:,0]/(1000*1000), TEs[:,0]/(1000*1000), FAs[:,0]/(100), PHs[:,0]/(100), IDs[:,0])
     simulation = Simulation(sequence, dictionary, phaseRange=phaseRange, numSpins=numSpins)
     simulationHash = hashlib.sha256(pickle.dumps(simulation)).hexdigest()
     dictionaryPath = dictionaryFolder+"/"+simulationHash+".simulation"
     logging.info(f"Dictionary Path: {dictionaryPath}")
     Path(dictionaryFolder).mkdir(parents=True, exist_ok=True)
-
-    azureLogging.updateEntity(table_client, currentScanEntity, 'SimulationHashUsedForReconstruction', simulationHash)
 
     ## Check if dictionary already exists
     if (os.path.isfile(dictionaryPath)):
@@ -614,13 +590,12 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
         ## Simulate the Dictionary
         logging.info("Dictionary not found. Simulating. ")
         simulation.Execute(numBatches=numBatches)
-        simulation.CalculateSVD(desiredSVDPower=0.98)
+        simulation.CalculateSVD(truncationNumberOverride=10)
         logging.info(f"Simulated {numSpirals*numSets} timepoints")
         del simulation.results
         filehandler = open(dictionaryPath, 'wb')
         pickle.dump(simulation, filehandler)
         filehandler.close()
-
 
     ## Run the Reconstruction
     svdData = ApplySVDCompression(rawdata, simulation, device=torch.device("cpu"))
@@ -635,56 +610,39 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     patternMatchResults, interpolatedResults, M0 = PatternMatchingViaMaxInnerProductWithInterpolation(imageData, dictionary, simulation, b1Binned = B1map_binned, voxelsPerBatch=2000)
     (wmFractionMap, gmFractionMap, csfFractionMap) = GenerateClassificationMaps(imageData, dictionary, simulation, matrixSize)
     reconstructionFinishTime = time.time()
-    azureLogging.updateEntity(table_client, currentScanEntity, 'AllImagesReconstructed', True)
-    azureLogging.updateEntity(table_client, currentScanEntity, 'ReconstructionTime', reconstructionFinishTime-rawDataTransferFinishTime)
 
-    ## Send out results
-    
-    images = []
-    # Data is ordered [x y z] in patternMatchResults and M0. Need to reorder to [z y x] for ISMRMRD, and split T1/T2 apart
-    #T1map = AddText((imageMask>0.1) * patternMatchResults['T1'] * 1000) # to milliseconds
-    #T1image = PopulateISMRMRDImage(header, T1map, acqHeaders[0,0,0], 0, window=2500, level=1250, comment="T1_ms")
-    #images.append(T1image) 
+def select_file():
+    filetypes = (
+        ('Siemens Raw Data', '*.dat'),
+        ('All files', '*.*')
+    )
 
-    # Data is ordered [x y z] in patternMatchResults and M0. Need to reorder to [z y x] for ISMRMRD, and split T1/T2 apart
-    T1map_interp = AddText((imageMask>0.1) * interpolatedResults['T1'] * 1000) # to milliseconds
-    T1image_interp = PopulateISMRMRDImage(header, T1map_interp, acqHeaders[0,0,0], 0, window=2500, level=1250, comment="T1_ms")
-    images.append(T1image_interp)
+    filename = fd.askopenfilename(
+        title='Open a file',
+        initialdir='/',
+        filetypes=filetypes)
 
-    #T2map = AddText((imageMask>0.1) * patternMatchResults['T2'] * 1000) # to milliseconds
-    #T2image = PopulateISMRMRDImage(header, T2map, acqHeaders[0,0,0], 2, window=500, level=200, comment="T2_ms")
-    #images.append(T2image)   
+    showinfo(
+        title='',
+        message="Beginning Reconstruction: " + filename
+    )
 
-    # Data is ordered [x y z] in patternMatchResults and M0. Need to reorder to [z y x] for ISMRMRD, and split T1/T2 apart
-    T2map_interp = AddText((imageMask>0.1) * interpolatedResults['T2'] * 1000) # to milliseconds
-    T2image_interp = PopulateISMRMRDImage(header, T2map_interp, acqHeaders[0,0,0], 1, window=200, level=100, comment="T2_ms")
-    images.append(T2image_interp)
-
-    M0map = AddText((imageMask>0.1) * (np.abs(M0) / np.max(np.abs(M0))) * 2**12)
-    M0image = PopulateISMRMRDImage(header, M0map, acqHeaders[0,0,0], 2, comment="M0")
-    images.append(M0image)   
-
-    #if(np.size(B1map) != 0):
-    #    B1image = PopulateISMRMRDImage(header, B1map, acqHeaders[0,0,0], 5, comment="B1")
-    #    images.append(B1image)  
-
-    WMimage = PopulateISMRMRDImage(header, AddText((imageMask>0.1) * wmFractionMap), acqHeaders[0,0,0], 3, comment="WM_Fraction")
-    images.append(WMimage)   
-
-    GMimage = PopulateISMRMRDImage(header, AddText((imageMask>0.1) * gmFractionMap), acqHeaders[0,0,0], 4, comment="GM_Fraction")
-    images.append(GMimage)   
-
-    CSFimage = PopulateISMRMRDImage(header, AddText((imageMask>0.1) * csfFractionMap), acqHeaders[0,0,0], 5, comment="CSF_Fraction")
-    images.append(CSFimage)  
-
-    #MASKimage = PopulateISMRMRDImage(header, AddText(imageMask*1000), acqHeaders[0,0,0],9,comment="mask")
-    #images.append(MASKimage)
-
-    connection.send_image(images)
-    imageTransferFinishTime = time.time()
-    azureLogging.updateEntity(table_client, currentScanEntity, 'AllImagesReturnedToScanner', True)
-    azureLogging.updateEntity(table_client, currentScanEntity, 'ImageTransferTime', imageTransferFinishTime-reconstructionFinishTime)
+    runReconstruction(filename)
 
 
+# create the root window
+root = tk.Tk()
+root.title('Open File Dialog')
+root.resizable(False, False)
+root.geometry('300x150')
 
-    connection.send_close()
+# open button
+open_button = ttk.Button(
+    root,
+    text='Select .dat File',
+    command=select_file
+)
+open_button.pack(expand=True)
+
+# run the application
+root.mainloop()
