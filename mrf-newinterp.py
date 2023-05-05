@@ -42,7 +42,7 @@ trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1
 densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
 
 # Azure logging configuration (temporary for testing, should be a secret in the cluster not plaintext)
-connectionString = ""
+connectionString = os.environ.get('LARGESCALEMRF_CONNECTION_STRING')
 tableName = "reconstructionLog"
 
 def ApplyXYZShift(svdData, header, acqHeaders, trajectories, matrixSizeOverride=None):
