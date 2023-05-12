@@ -37,7 +37,7 @@ dictionaryFolder = "/usr/share/dictionary-data"
 # Configure dictionary simulation parameters
 dictionaryName = "5pct"
 percentStepSize=5; includeB1=False;  t1Range=(10,4000); t2Range=(1,500); b1Range=(0.5, 1.55); b1Stepsize=0.05; 
-phaseRange=(-np.pi, np.pi); numSpins=15; numBatches=100
+phaseRange=(-np.pi, np.pi); numSpins=50; numBatches=100
 
 
 # Azure logging configuration (temporary for testing, should be a secret in the cluster not plaintext)
@@ -482,6 +482,7 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     centerMeasuredPartition = enc.encodingLimits.kspace_encoding_step_2.center; logging.info(f"Center Measured Partition: {centerMeasuredPartition}") # Fix this in stylesheet
     numSets = enc.encodingLimits.set.maximum+1; logging.info(f"Sets: {numSets}")
     numCoils = header.acquisitionSystemInformation.receiverChannels; logging.info(f"Coils: {numCoils}")
+    fieldOfView = np.array([enc.encodedSpace.fieldOfView_mm.x,enc.encodedSpace.fieldOfView_mm.y,enc.encodedSpace.fieldOfView_mm.z]); logging.info(f"Field of View (mm): {fieldOfView}")
     matrixSize = np.array([enc.reconSpace.matrixSize.x,enc.reconSpace.matrixSize.y,enc.reconSpace.matrixSize.z]); logging.info(f"Matrix Size: {matrixSize}")
     numUndersampledPartitions = matrixSize[2]; logging.info(f"Undersampled Partitions: {numUndersampledPartitions}")
     undersamplingRatio = 1
@@ -509,19 +510,24 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
     discardPre=0;discardPost=0
 
     ## If dictionary simulation is new, upload to Azure so it will exist forever?
-    if matrixSize[0]==256:
+    if matrixSize[0]==256 and fieldOfView[0]==250 and numSpirals==48:
         trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1916_norm.bin"
         densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
-        numToDiscard = 1916
-    elif matrixSize[0]==400:
+        trajectoryReadoutLength = 1916
+        ## If dictionary simulation is new, upload to Azure so it will exist forever?
+    elif matrixSize[0]==256 and fieldOfView[0]==300 and numSpirals==48:
+        trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV300_256_uplimit2020_norm.bin"
+        densityFilepath="mrf_dependencies/trajectories/DCW_FOV300_256_uplimit2020.bin"
+        trajectoryReadoutLength = 2000
+    elif matrixSize[0]==400: #and fieldOfView[0]==400 and numSpirals==48:
         trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV400_400_uplimit2890_norm.bin"
         densityFilepath="mrf_dependencies/trajectories/DCW_FOV400_400_uplimit2890.bin"
-        numToDiscard = 2890
+        trajectoryReadoutLength = 2890
     else:
         print("Trajectory unknown, using default")
         trajectoryFilepath="mrf_dependencies/trajectories/SpiralTraj_FOV250_256_uplimit1916_norm.bin"
         densityFilepath="mrf_dependencies/trajectories/DCW_FOV250_256_uplimit1916.bin"
-        numToDiscard = 1916
+        trajectoryReadoutLength = 1916
         
     # Process data as it comes in
     try:
@@ -546,7 +552,7 @@ def process(connection:Connection, config, metadata:ismrmrd.xsd.ismrmrdHeader):
                 acqHeaders[undersampledPartition, spiral, set] = acqHeader
                 if rawdata is None:
                     discardPre = int(acqHeader.discard_pre / 2); logging.info(f"Discard Pre: {discardPre}") # Fix doubling in sequence - weird;
-                    discardPost = discardPre + numToDiscard; logging.info(f"Discard Post: {discardPost}") # Fix in sequence
+                    discardPost = discardPre + trajectoryReadoutLength; logging.info(f"Discard Post: {discardPost}") # Fix in sequence
                     numReadoutPoints = discardPost-discardPre; logging.info(f"Readout Points: {numReadoutPoints}")
                     rawdata = np.zeros([numCoils, numUndersampledPartitions, numReadoutPoints, numSpirals, numSets], dtype=np.complex64)
                 readout = acq.data[:, discardPre:discardPost]
